@@ -2,9 +2,7 @@
 /.DS_Store
 /.metadata
 /pkg/
-/bin/ginkgo
+/bin/
 /.recommenders
 /.project
 /.settings/
-/bin/metricscollector
-/bin/dataaggregator
