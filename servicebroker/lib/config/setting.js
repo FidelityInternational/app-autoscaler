@@ -21,15 +21,21 @@ module.exports = function(settingsObj) {
   };
   settingsObj.apiserver.uri = cleanupURI(settingsObj.apiserver.uri);
   settingsObj.dashboardRedirectUri = cleanupURI(settingsObj.dashboardRedirectUri);
+  settingsObj.customMetricsUrl = cleanupURI(settingsObj.customMetricsUrl);
   var settings = {
-    port: settingsObj.port,
+    publicPort: settingsObj.publicPort,
+    port : settingsObj.port,
     username: settingsObj.username,
     password: settingsObj.password,
+    enableCustomMetrics: settingsObj.enableCustomMetrics,
     apiserver: settingsObj.apiserver,
     httpRequestTimeout: settingsObj.httpRequestTimeout,
     tls: settingsObj.tls,
+    publicTls: settingsObj.publicTls,
     serviceCatalogPath: settingsObj.serviceCatalogPath,
-    dashboardRedirectUri: settingsObj.dashboardRedirectUri
+    schemaValidationPath: settingsObj.schemaValidationPath,
+    dashboardRedirectUri: settingsObj.dashboardRedirectUri,
+    customMetricsUrl: settingsObj.customMetricsUrl
   };
   if (settingsObj.db) {
     var dbObj = db(settingsObj.db.uri);
@@ -55,7 +61,20 @@ module.exports = function(settingsObj) {
   var isObject = function(value){
     return typeof(value) === "object";
   }
+  var isBoolean = function(value){
+    return typeof(value) === "boolean";
+  }
   settings.validate = function() {
+    if (isMissing(settings.publicPort)) {
+      return { valid: false, message: "publicPort is required" };
+    }
+    if (!isNumber(settings.publicPort)) {
+      return { valid: false, message: "publicPort must be a number" };
+    }
+    if (settings.publicPort < 1 || settings.publicPort > 65535) {
+      return { valid: false, message: "value of publicPort must between 1 and 65535" };
+    }
+
     if (isMissing(settings.port)) {
       return { valid: false, message: "port is required" };
     }
@@ -77,6 +96,12 @@ module.exports = function(settingsObj) {
     }
     if (!isString(settings.password)) {
       return { valid: false, message: "password must be a string" };
+    }
+    if (isMissing(settings.enableCustomMetrics)) {
+      return { valid: false, message: "enableCustomMetrics is required" };
+    }
+    if (!isBoolean(settings.enableCustomMetrics)) {
+      return { valid: false, message: "enableCustomMetrics must be a boolean" };
     }
     if (isMissing(settings.db.maxConnections)) {
       return { valid: false, message: "db.maxConnections is required" };
@@ -172,14 +197,48 @@ module.exports = function(settingsObj) {
         return { valid: false, message: "tls.caCertFile must be a string" };
       }
     }
+
+    if(!isMissing(settings.publicTls)){
+      if(!isObject(settings.publicTls)){
+        return { valid: false, message: "publicTls must be an object" };
+      } 
+      if (isMissing(settings.publicTls.keyFile)) {
+        return { valid: false, message: "publicTls.keyFile is required" };
+      }
+      if (!isString(settings.publicTls.keyFile)) {
+        return { valid: false, message: "publicTls.keyFile must be a string" };
+      }
+      if (isMissing(settings.publicTls.certFile)) {
+        return { valid: false, message: "publicTls.certFile is required" };
+      }
+      if (!isString(settings.publicTls.certFile)) {
+        return { valid: false, message: "publicTls.certFile must be a string" };
+      }
+      if (isMissing(settings.publicTls.caCertFile)) {
+        return { valid: false, message: "publicTls.caCertFile is required" };
+      }
+      if (!isString(settings.publicTls.caCertFile)) {
+        return { valid: false, message: "publicTls.caCertFile must be a string" };
+      }
+    }
+
     if (isMissing(settings.serviceCatalogPath)) {
       return {valid: false, message: "serviceCatalogPath is required"}
     }
     if (!isString(settings.serviceCatalogPath)) {
       return {valid: false, message: "serviceCatalogPath must be a string"}
     }
+    if (isMissing(settings.schemaValidationPath)) {
+      return {valid: false, message: "schemaValidationPath is required"}
+    }
+    if (!isString(settings.schemaValidationPath)) {
+      return {valid: false, message: "schemaValidationPath must be a string"}
+    }
     if (!isMissing(settings.dashboardRedirectUri) && !isString(settings.dashboardRedirectUri)) {
       return {valid: false, message: "dashboardRedirectUri must be a string"}
+    }
+    if (!isMissing(settings.customMetricsUrl) && !isString(settings.customMetricsUrl)) {
+      return {valid: false, message: "customMetricsUrl must be a string"}
     }
     return { valid: true }
   }

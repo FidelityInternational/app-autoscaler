@@ -37,26 +37,45 @@ func (p *PolicyJson) GetAppPolicy() *AppPolicy {
 }
 
 type ScalingPolicy struct {
-	InstanceMin  int            `json:"instance_min_count"`
-	InstanceMax  int            `json:"instance_max_count"`
-	ScalingRules []*ScalingRule `json:"scaling_rules"`
+	InstanceMin  int               `json:"instance_min_count"`
+	InstanceMax  int               `json:"instance_max_count"`
+	ScalingRules []*ScalingRule    `json:"scaling_rules,omitempty"`
+	Schedules    *ScalingSchedules `json:"schedules,omitempty"`
 }
 
 type ScalingRule struct {
 	MetricType            string `json:"metric_type"`
-	StatWindowSeconds     int    `json:"stat_window_secs"`
-	BreachDurationSeconds int    `json:"breach_duration_secs"`
+	BreachDurationSeconds int    `json:"breach_duration_secs,omitempty"`
 	Threshold             int64  `json:"threshold"`
 	Operator              string `json:"operator"`
-	CoolDownSeconds       int    `json:"cool_down_secs"`
+	CoolDownSeconds       int    `json:"cool_down_secs,omitempty"`
 	Adjustment            string `json:"adjustment"`
 }
 
-func (r *ScalingRule) StatWindow(defaultStatWindowSecs int) time.Duration {
-	if r.StatWindowSeconds <= 0 {
-		return time.Duration(defaultStatWindowSecs) * time.Second
-	}
-	return time.Duration(r.StatWindowSeconds) * time.Second
+type ScalingSchedules struct {
+	Timezone              string                  `json:"timezone"`
+	RecurringSchedules    []*RecurringSchedule    `json:"recurring_schedule,omitempty"`
+	SpecificDateSchedules []*SpecificDateSchedule `json:"specific_date,omitempty"`
+}
+
+type RecurringSchedule struct {
+	StartTime             string `json:"start_time"`
+	EndTime               string `json:"end_time"`
+	DaysOfWeek            []int  `json:"days_of_week,omitempty"`
+	DaysOfMonth           []int  `json:"days_of_month,omitempty"`
+	StartDate             string `json:"start_date,omitempty"`
+	EndDate               string `json:"end_date,omitempty"`
+	ScheduledInstanceMin  int    `json:"instance_min_count"`
+	ScheduledInstanceMax  int    `json:"instance_max_count"`
+	ScheduledInstanceInit int    `json:"initial_min_instance_count"`
+}
+
+type SpecificDateSchedule struct {
+	StartDateTime         string `json:"start_date_time"`
+	EndDateTime           string `json:"end_date_time"`
+	ScheduledInstanceMin  int    `json:"instance_min_count"`
+	ScheduledInstanceMax  int    `json:"instance_max_count"`
+	ScheduledInstanceInit int    `json:"initial_min_instance_count"`
 }
 
 func (r *ScalingRule) BreachDuration(defaultBreachDurationSecs int) time.Duration {

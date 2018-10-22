@@ -24,13 +24,15 @@ var getTimeZones = function() {
 }
 
 JSONValidator.prototype.customFormats.timeZoneFormat = function(inputTimeZone) {
-  var result = false;
+  if (inputTimeZone === "undefined" || inputTimeZone === null) {
+    return false;
+  }
   var trimmedTimeZone = inputTimeZone.replace(/\s+/g, '');
   var timeZoneList = getTimeZones();
   if(_.contains(timeZoneList,trimmedTimeZone)) {
-    result = true;
+    return true;
   }
-  return result;
+  return false;
 };
 
 
@@ -41,7 +43,7 @@ var getValidOperators = function() {
 };
 
 var getAdjustmentPattern = function() {
-  var adjustmentPattern = '^[-|+][1-9]+[0-9]*$';
+  var adjustmentPattern = '^[-+][1-9]+[0-9]*[%]?$';
   return adjustmentPattern;
 };
 
@@ -71,6 +73,7 @@ var getPolicySchema = function() {
       'instance_max_count': { 'type':'integer','minimum':1 },
       'scaling_rules': {
         'type':'array',
+        'minItems': 1,
         'items': { '$ref': '/scaling_rules' }
       },
       'schedules': { '$ref':'/schedules' }
@@ -85,13 +88,11 @@ var getPolicySchema = function() {
 var getScalingRuleSchema = function() {
   var validOperators = getValidOperators();
   var adjustmentPattern = getAdjustmentPattern();
-  var metricTypeEnum = getMetricTypes();
   var schema = {
     'type': 'object',
     'id':'/scaling_rules',
     'properties' : {
-      'metric_type':{ 'type':'string' ,'enum':metricTypeEnum },
-      'stat_window_secs':{ 'type':'number','minimum': 60,'maximum': 3600 },
+      'metric_type':{ 'type':'string' },
       'breach_duration_secs':{ 'type':'number','minimum': 60,'maximum': 3600 },
       'threshold':{ 'type':'number'},
       'operator':{ 'type':'string','enum': validOperators },
@@ -145,9 +146,9 @@ var getRecurringSchema = function() {
       'instance_min_count':{ 'type':'integer','minimum':1 },
       'instance_max_count':{ 'type':'integer','minimum':1 },
       'initial_min_instance_count':{ 'type':'integer','minimum':1 },
-      'days_of_week':{ 'type':'array','uniqueItems': true,
+      'days_of_week':{ 'type':'array','uniqueItems': true, 'minItems': 1,
         'items':{ 'type':'number','enum':weekEnum } },
-      'days_of_month':{ 'type':'array','uniqueItems': true,
+      'days_of_month':{ 'type':'array','uniqueItems': true, 'minItems': 1,
         'items':{ 'type':'number','enum':monthEnum } }
     },
     'required' : ['start_time','end_time','instance_min_count','instance_max_count'],

@@ -26,18 +26,19 @@ const testUrlAppActiveSchedule = "http://localhost/v1/apps/an-app-id/active_sche
 
 var _ = Describe("ScalingHandler", func() {
 	var (
-		scalingEngineDB    *fakes.FakeScalingEngineDB
-		scalingEngine      *fakes.FakeScalingEngine
-		handler            *ScalingHandler
-		resp               *httptest.ResponseRecorder
-		req                *http.Request
-		body               []byte
-		err                error
-		trigger            *models.Trigger
-		buffer             *gbytes.Buffer
-		history1, history2 *models.AppScalingHistory
-		activeSchedule     *models.ActiveSchedule
-		testMetricName     string = "Test-Metric-Name"
+		scalingEngineDB              *fakes.FakeScalingEngineDB
+		scalingEngine                *fakes.FakeScalingEngine
+		health                       *fakes.FakeHealth
+		handler                      *ScalingHandler
+		resp                         *httptest.ResponseRecorder
+		req                          *http.Request
+		body                         []byte
+		err                          error
+		trigger                      *models.Trigger
+		buffer                       *gbytes.Buffer
+		history1, history2, history3 *models.AppScalingHistory
+		activeSchedule               *models.ActiveSchedule
+		testMetricName               string = "Test-Metric-Name"
 	)
 
 	BeforeEach(func() {
@@ -45,18 +46,26 @@ var _ = Describe("ScalingHandler", func() {
 		buffer = logger.Buffer()
 		scalingEngineDB = &fakes.FakeScalingEngineDB{}
 		scalingEngine = &fakes.FakeScalingEngine{}
-		handler = NewScalingHandler(logger, scalingEngineDB, scalingEngine)
+		health = &fakes.FakeHealth{}
+		handler = NewScalingHandler(logger, scalingEngineDB, scalingEngine, health)
 		resp = httptest.NewRecorder()
 	})
 
 	Describe("Scale", func() {
 		JustBeforeEach(func() {
 			handler.Scale(resp, req, map[string]string{"appid": "an-app-id"})
+			Expect(health.IncCallCount()).To(Equal(1))
+			Expect(health.DecCallCount()).To(Equal(1))
 		})
 
 		Context("when scaling app succeeds", func() {
 			BeforeEach(func() {
-				scalingEngine.ScaleReturns(3, nil)
+				scalingEngine.ScaleReturns(&models.AppScalingResult{
+					AppId:             "an-app-id",
+					Status:            models.ScalingStatusSucceeded,
+					Adjustment:        1,
+					CooldownExpiredAt: 10000,
+				}, nil)
 
 				trigger = &models.Trigger{
 					MetricType: testMetricName,
@@ -77,10 +86,13 @@ var _ = Describe("ScalingHandler", func() {
 				Expect(appId).To(Equal("an-app-id"))
 				Expect(scaleTrigger).To(Equal(trigger))
 
-				props := &models.AppEntity{}
+				props := &models.AppScalingResult{}
 				err = json.Unmarshal(resp.Body.Bytes(), props)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(props.Instances).To(Equal(3))
+				Expect(props.Adjustment).To(Equal(1))
+				Expect(props.AppId).To(Equal("an-app-id"))
+				Expect(props.Status).To(Equal(models.ScalingStatusSucceeded))
+				Expect(props.CooldownExpiredAt).To(Equal(int64(10000)))
 			})
 		})
 
@@ -105,7 +117,12 @@ var _ = Describe("ScalingHandler", func() {
 
 		Context("when scaling app fails", func() {
 			BeforeEach(func() {
-				scalingEngine.ScaleReturns(0, errors.New("an error"))
+				scalingEngine.ScaleReturns(&models.AppScalingResult{
+					AppId:             "an-app-id",
+					Status:            models.ScalingStatusFailed,
+					Adjustment:        0,
+					CooldownExpiredAt: 0,
+				}, errors.New("an error"))
 
 				trigger = &models.Trigger{
 					MetricType: testMetricName,
@@ -135,6 +152,8 @@ var _ = Describe("ScalingHandler", func() {
 	Describe("GetScalingHistories", func() {
 		JustBeforeEach(func() {
 			handler.GetScalingHistories(resp, req, map[string]string{"appid": "an-app-id"})
+			Expect(health.IncCallCount()).To(Equal(1))
+			Expect(health.DecCallCount()).To(Equal(1))
 		})
 
 		Context("when request query string is invalid", func() {
@@ -142,7 +161,6 @@ var _ = Describe("ScalingHandler", func() {
 				BeforeEach(func() {
 					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?start=123&start=231", nil)
 					Expect(err).ToNot(HaveOccurred())
-
 				})
 
 				It("returns 400", func() {
@@ -163,7 +181,6 @@ var _ = Describe("ScalingHandler", func() {
 				BeforeEach(func() {
 					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?start=abc", nil)
 					Expect(err).ToNot(HaveOccurred())
-
 				})
 
 				It("returns 400", func() {
@@ -184,7 +201,6 @@ var _ = Describe("ScalingHandler", func() {
 				BeforeEach(func() {
 					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?end=123&end=231", nil)
 					Expect(err).ToNot(HaveOccurred())
-
 				})
 
 				It("returns 400", func() {
@@ -205,7 +221,6 @@ var _ = Describe("ScalingHandler", func() {
 				BeforeEach(func() {
 					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?end=abc", nil)
 					Expect(err).ToNot(HaveOccurred())
-
 				})
 
 				It("returns 400", func() {
@@ -226,7 +241,6 @@ var _ = Describe("ScalingHandler", func() {
 				BeforeEach(func() {
 					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?order=asc&order=asc", nil)
 					Expect(err).ToNot(HaveOccurred())
-
 				})
 
 				It("returns 400", func() {
@@ -245,9 +259,8 @@ var _ = Describe("ScalingHandler", func() {
 
 			Context("when order value is invalid", func() {
 				BeforeEach(func() {
-					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?order=not-order-type", nil)
+					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?order=invalid-order", nil)
 					Expect(err).ToNot(HaveOccurred())
-
 				})
 
 				It("returns 400", func() {
@@ -259,67 +272,120 @@ var _ = Describe("ScalingHandler", func() {
 					Expect(err).ToNot(HaveOccurred())
 					Expect(errJson).To(Equal(&models.ErrorResponse{
 						Code:    "Bad-Request",
-						Message: fmt.Sprintf("Incorrect order parameter in query string, the value can only be %s or %s", db.ASC, db.DESC),
+						Message: fmt.Sprintf("Incorrect order parameter in query string, the value can only be 'ASC' or 'DESC'"),
+					}))
+				})
+			})
+
+			Context("when there are multiple include pararmeters in query string", func() {
+				BeforeEach(func() {
+					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?include=all&include=all", nil)
+					Expect(err).ToNot(HaveOccurred())
+				})
+
+				It("returns 400", func() {
+					Expect(resp.Code).To(Equal(http.StatusBadRequest))
+
+					errJson := &models.ErrorResponse{}
+					err = json.Unmarshal(resp.Body.Bytes(), errJson)
+
+					Expect(err).ToNot(HaveOccurred())
+					Expect(errJson).To(Equal(&models.ErrorResponse{
+						Code:    "Bad-Request",
+						Message: "Incorrect include parameter in query string",
+					}))
+				})
+			})
+
+			Context("when include value is invalid", func() {
+				BeforeEach(func() {
+					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?include=invalid-include-value", nil)
+					Expect(err).ToNot(HaveOccurred())
+				})
+
+				It("returns 400", func() {
+					Expect(resp.Code).To(Equal(http.StatusBadRequest))
+
+					errJson := &models.ErrorResponse{}
+					err = json.Unmarshal(resp.Body.Bytes(), errJson)
+
+					Expect(err).ToNot(HaveOccurred())
+					Expect(errJson).To(Equal(&models.ErrorResponse{
+						Code:    "Bad-Request",
+						Message: fmt.Sprintf("Incorrect include parameter in query string, the value can only be 'all'"),
 					}))
 				})
 			})
 		})
 
 		Context("when request query string is valid", func() {
-			Context("when start, end and order are all in query string", func() {
+			Context("when start, end, order and include parameter are all in query string", func() {
 				BeforeEach(func() {
-					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?start=123&end=567&order=desc", nil)
+					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?start=123&end=567&order=desc&include=all", nil)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
 				It("retrieves scaling histories from database with the given start and end time and order ", func() {
-					appid, start, end, order := scalingEngineDB.RetrieveScalingHistoriesArgsForCall(0)
+					appid, start, end, order, includeAll := scalingEngineDB.RetrieveScalingHistoriesArgsForCall(0)
 					Expect(appid).To(Equal("an-app-id"))
 					Expect(start).To(Equal(int64(123)))
 					Expect(end).To(Equal(int64(567)))
 					Expect(order).To(Equal(db.DESC))
+					Expect(includeAll).To(BeTrue())
 				})
 			})
 
-			Context("when there is no start time in query string", func() {
+			Context("when there is no start time parameter in query string", func() {
 				BeforeEach(func() {
 					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?end=123&order=desc", nil)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
 				It("queries scaling histories from database with start time  0", func() {
-					_, start, _, _ := scalingEngineDB.RetrieveScalingHistoriesArgsForCall(0)
+					_, start, _, _, _ := scalingEngineDB.RetrieveScalingHistoriesArgsForCall(0)
 					Expect(start).To(Equal(int64(0)))
 				})
 			})
 
-			Context("when there is no end time in query string", func() {
+			Context("when there is no end time patameter in query string", func() {
 				BeforeEach(func() {
 					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?start=123&order=desc", nil)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
 				It("queries scaling histories from database with end time -1 ", func() {
-					_, _, end, _ := scalingEngineDB.RetrieveScalingHistoriesArgsForCall(0)
+					_, _, end, _, _ := scalingEngineDB.RetrieveScalingHistoriesArgsForCall(0)
 					Expect(end).To(Equal(int64(-1)))
 				})
 			})
 
-			Context("when there is no order in query string", func() {
+			Context("when there is no order parameter in query string", func() {
 				BeforeEach(func() {
 					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?start=123&end=567", nil)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
 				It("queries scaling histories from database with order desc", func() {
-					_, _, _, order := scalingEngineDB.RetrieveScalingHistoriesArgsForCall(0)
+					_, _, _, order, _ := scalingEngineDB.RetrieveScalingHistoriesArgsForCall(0)
 					Expect(order).To(Equal(db.DESC))
+				})
+			})
+
+			Context("when there is no include parameter in query string", func() {
+				BeforeEach(func() {
+					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?start=123&end=567", nil)
+					Expect(err).ToNot(HaveOccurred())
+				})
+
+				It("queries all scaling histories from database", func() {
+					_, _, _, _, includeAll := scalingEngineDB.RetrieveScalingHistoriesArgsForCall(0)
+					Expect(includeAll).To(BeFalse())
 				})
 			})
 
 			Context("when query database succeeds", func() {
 				BeforeEach(func() {
-					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?start=123&end=567&order=desc", nil)
+					req, err = http.NewRequest(http.MethodGet, testUrlScalingHistories+"?start=123&end=567&order=desc&include=all", nil)
 					Expect(err).ToNot(HaveOccurred())
 
 					history1 = &models.AppScalingHistory{
@@ -344,7 +410,18 @@ var _ = Describe("ScalingHandler", func() {
 						Error:        "an error",
 					}
 
-					scalingEngineDB.RetrieveScalingHistoriesReturns([]*models.AppScalingHistory{history2, history1}, nil)
+					history3 = &models.AppScalingHistory{
+						AppId:        "an-app-id",
+						Timestamp:    444,
+						ScalingType:  models.ScalingTypeDynamic,
+						Status:       models.ScalingStatusIgnored,
+						OldInstances: 2,
+						NewInstances: 4,
+						Reason:       "a reason",
+						Message:      "a message",
+					}
+
+					scalingEngineDB.RetrieveScalingHistoriesReturns([]*models.AppScalingHistory{history3, history2, history1}, nil)
 				})
 
 				It("returns 200 with scaling histories in message body", func() {
@@ -354,7 +431,7 @@ var _ = Describe("ScalingHandler", func() {
 					err = json.Unmarshal(resp.Body.Bytes(), histories)
 
 					Expect(err).ToNot(HaveOccurred())
-					Expect(*histories).To(Equal([]models.AppScalingHistory{*history2, *history1}))
+					Expect(*histories).To(Equal([]models.AppScalingHistory{*history3, *history2, *history1}))
 				})
 			})
 
@@ -387,6 +464,8 @@ var _ = Describe("ScalingHandler", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			handler.StartActiveSchedule(resp, req, map[string]string{"appid": "an-app-id", "schduleid": "a-schdule-id"})
+			Expect(health.IncCallCount()).To(Equal(1))
+			Expect(health.DecCallCount()).To(Equal(1))
 		})
 
 		Context("when active schedule is valid", func() {
@@ -443,6 +522,8 @@ var _ = Describe("ScalingHandler", func() {
 			Expect(err).ToNot(HaveOccurred())
 
 			handler.RemoveActiveSchedule(resp, req, map[string]string{"appid": "an-app-id", "schduleid": "a-schdule-id"})
+			Expect(health.IncCallCount()).To(Equal(1))
+			Expect(health.DecCallCount()).To(Equal(1))
 		})
 
 		Context("when removing active schedule succeeds", func() {
@@ -491,13 +572,14 @@ var _ = Describe("ScalingHandler", func() {
 	Describe("GetActiveSchedule", func() {
 		JustBeforeEach(func() {
 			handler.GetActiveSchedule(resp, req, map[string]string{"appid": "invalid-app-id"})
+			Expect(health.IncCallCount()).To(Equal(1))
+			Expect(health.DecCallCount()).To(Equal(1))
 		})
 
 		Context("when app id is invalid", func() {
 			BeforeEach(func() {
 				req, err = http.NewRequest(http.MethodGet, testUrlAppActiveSchedule, nil)
 				Expect(err).ToNot(HaveOccurred())
-
 				scalingEngineDB.GetActiveScheduleReturns(nil, nil)
 			})
 

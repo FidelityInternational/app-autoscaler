@@ -10,7 +10,6 @@ import (
 	"code.cloudfoundry.org/cfhttp"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"github.com/onsi/gomega/gbytes"
 	"github.com/onsi/gomega/gexec"
 	"github.com/onsi/gomega/ghttp"
 	"gopkg.in/yaml.v2"
@@ -24,8 +23,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"code.cloudfoundry.org/consuladapter/consulrunner"
 )
 
 func TestScalingengine(t *testing.T) {
@@ -34,14 +31,15 @@ func TestScalingengine(t *testing.T) {
 }
 
 var (
-	enginePath   string
-	conf         config.Config
-	port         int
-	configFile   *os.File
-	ccUAA        *ghttp.Server
-	appId        string
-	httpClient   *http.Client
-	consulRunner *consulrunner.ClusterRunner
+	enginePath       string
+	conf             config.Config
+	port             int
+	healthport       int
+	configFile       *os.File
+	ccUAA            *ghttp.Server
+	appId            string
+	httpClient       *http.Client
+	healthHttpClient *http.Client
 )
 
 var _ = SynchronizedBeforeSuite(
@@ -51,16 +49,6 @@ var _ = SynchronizedBeforeSuite(
 		return []byte(compiledPath)
 	},
 	func(pathBytes []byte) {
-		consulRunner = consulrunner.NewClusterRunner(
-			consulrunner.ClusterRunnerConfig{
-				StartingPort: 9001 + GinkgoParallelNode()*consulrunner.PortOffsetLength,
-				NumNodes:     1,
-				Scheme:       "http",
-			},
-		)
-		consulRunner.Start()
-		consulRunner.WaitUntilReady()
-
 		enginePath = string(pathBytes)
 
 		ccUAA = ghttp.NewServer()
@@ -73,33 +61,50 @@ var _ = SynchronizedBeforeSuite(
 		ccUAA.RouteToHandler("POST", "/oauth/token", ghttp.RespondWithJSONEncoded(http.StatusOK, cf.Tokens{}))
 
 		appId = fmt.Sprintf("%s-%d", "app-id", GinkgoParallelNode())
-		ccUAA.RouteToHandler("GET", "/v2/apps/"+appId, ghttp.RespondWithJSONEncoded(http.StatusOK,
-			models.AppInfo{Entity: models.AppEntity{Instances: 2}}))
+		appState := models.AppStatusStarted
+		ccUAA.RouteToHandler("GET", "/v2/apps/"+appId+"/summary", ghttp.RespondWithJSONEncoded(http.StatusOK,
+			models.AppEntity{Instances: 2, State: &appState}))
 		ccUAA.RouteToHandler("PUT", "/v2/apps/"+appId, ghttp.RespondWith(http.StatusCreated, ""))
 
-		conf.Cf = cf.CfConfig{
-			Api:       ccUAA.URL(),
+		conf.CF = cf.CFConfig{
+			API:       ccUAA.URL(),
 			GrantType: cf.GrantTypePassword,
 			Username:  "admin",
 			Password:  "admin",
 		}
 
 		port = 7000 + GinkgoParallelNode()
+		healthport = 8000 + GinkgoParallelNode()
 		testCertDir := "../../../../../test-certs"
 		conf.Server.Port = port
 		conf.Server.TLS.KeyFile = filepath.Join(testCertDir, "scalingengine.key")
 		conf.Server.TLS.CertFile = filepath.Join(testCertDir, "scalingengine.crt")
 		conf.Server.TLS.CACertFile = filepath.Join(testCertDir, "autoscaler-ca.crt")
-
+		conf.Health.Port = healthport
+		conf.Health.EmitInterval = 1 * time.Second
 		conf.Logging.Level = "debug"
 
-		conf.Db.PolicyDbUrl = os.Getenv("DBURL")
-		conf.Db.ScalingEngineDbUrl = os.Getenv("DBURL")
-		conf.Db.SchedulerDbUrl = os.Getenv("DBURL")
-		conf.Synchronizer.ActiveScheduleSyncInterval = 10 * time.Minute
+		conf.DB.PolicyDB = db.DatabaseConfig{
+			URL:                   os.Getenv("DBURL"),
+			MaxOpenConnections:    10,
+			MaxIdleConnections:    5,
+			ConnectionMaxLifetime: 10 * time.Second,
+		}
+		conf.DB.ScalingEngineDB = db.DatabaseConfig{
+			URL:                   os.Getenv("DBURL"),
+			MaxOpenConnections:    10,
+			MaxIdleConnections:    5,
+			ConnectionMaxLifetime: 10 * time.Second,
+		}
+		conf.DB.SchedulerDB = db.DatabaseConfig{
+			URL:                   os.Getenv("DBURL"),
+			MaxOpenConnections:    10,
+			MaxIdleConnections:    5,
+			ConnectionMaxLifetime: 10 * time.Second,
+		}
 
-		conf.Consul.Cluster = consulRunner.ConsulCluster()
 		conf.DefaultCoolDownSecs = 300
+		conf.LockSize = 32
 
 		configFile = writeConfig(&conf)
 
@@ -139,14 +144,12 @@ var _ = SynchronizedBeforeSuite(
 				TLSClientConfig: tlsConfig,
 			},
 		}
+		healthHttpClient = &http.Client{}
 
 	})
 
 var _ = SynchronizedAfterSuite(
 	func() {
-		if consulRunner != nil {
-			consulRunner.Stop()
-		}
 		ccUAA.Close()
 		os.Remove(configFile.Name())
 	},
@@ -172,6 +175,7 @@ func writeConfig(c *config.Config) *os.File {
 type ScalingEngineRunner struct {
 	configPath string
 	startCheck string
+	port       int
 	Session    *gexec.Session
 }
 
@@ -193,11 +197,6 @@ func (engine *ScalingEngineRunner) Start() {
 		gexec.NewPrefixedWriter("\x1b[91m[e]\x1b[32m[engine]\x1b[0m ", GinkgoWriter),
 	)
 	Expect(err).NotTo(HaveOccurred())
-
-	if engine.startCheck != "" {
-		Eventually(engineSession.Buffer, 2).Should(gbytes.Say(engine.startCheck))
-	}
-
 	engine.Session = engineSession
 }
 

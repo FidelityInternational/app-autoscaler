@@ -10,17 +10,18 @@ import (
 var _ = Describe("Config", func() {
 
 	var (
-		conf *CfConfig
+		conf *CFConfig
 		err  error
 	)
 
 	Describe("Validate", func() {
 		BeforeEach(func() {
-			conf = &CfConfig{}
-			conf.Api = "http://api.example.com"
+			conf = &CFConfig{}
+			conf.API = "http://api.example.com"
 			conf.GrantType = GrantTypePassword
 			conf.Username = "admin"
-			conf.ClientId = "admin"
+			conf.ClientID = "admin"
+			conf.SkipSSLValidation = false
 		})
 
 		JustBeforeEach(func() {
@@ -29,17 +30,34 @@ var _ = Describe("Config", func() {
 
 		Context("when api is not set", func() {
 			BeforeEach(func() {
-				conf.Api = ""
+				conf.API = ""
 			})
 
 			It("should error", func() {
 				Expect(err).To(MatchError("Configuration error: cf api is empty"))
 			})
 		})
+		Context("when SkipSSLValidation is not set", func() {
+			It("should set SkipSSLValidation to default false value", func() {
+				Expect(err).NotTo(HaveOccurred())
+				Expect(conf.SkipSSLValidation).To(Equal(false))
+			})
+		})
+
+		Context("when SkipSSLValidation is set", func() {
+			BeforeEach(func() {
+				conf.SkipSSLValidation = true
+			})
+
+			It("should not error", func() {
+				Expect(err).NotTo(HaveOccurred())
+				Expect(conf.SkipSSLValidation).To(Equal(true))
+			})
+		})
 
 		Context("when api is not a url", func() {
 			BeforeEach(func() {
-				conf.Api = "http://a.com%"
+				conf.API = "http://a.com%"
 			})
 
 			It("should error", func() {
@@ -49,7 +67,7 @@ var _ = Describe("Config", func() {
 
 		Context("when api scheme is empty", func() {
 			BeforeEach(func() {
-				conf.Api = "a.com"
+				conf.API = "a.com"
 			})
 
 			It("should error", func() {
@@ -59,7 +77,7 @@ var _ = Describe("Config", func() {
 
 		Context("when api has invalid scheme", func() {
 			BeforeEach(func() {
-				conf.Api = "badscheme://a.com"
+				conf.API = "badscheme://a.com"
 			})
 
 			It("should error", func() {
@@ -69,12 +87,12 @@ var _ = Describe("Config", func() {
 
 		Context("when api is valid but ends with a '/'", func() {
 			BeforeEach(func() {
-				conf.Api = "https://a.com/"
+				conf.API = "https://a.com/"
 			})
 
 			It("should not error and remove the '/'", func() {
 				Expect(err).NotTo(HaveOccurred())
-				Expect(conf.Api).To(Equal("https://a.com"))
+				Expect(conf.API).To(Equal("https://a.com"))
 			})
 		})
 
@@ -84,7 +102,7 @@ var _ = Describe("Config", func() {
 			})
 
 			It("should error", func() {
-				Expect(err).To(MatchError(MatchRegexp("Configuration error: unsupported grant type*")))
+				Expect(err).To(MatchError(MatchRegexp("Configuration error: unsupported grant_type*")))
 			})
 		})
 
@@ -95,7 +113,7 @@ var _ = Describe("Config", func() {
 
 			Context("when user name is set", func() {
 				BeforeEach(func() {
-					conf.ClientId = ""
+					conf.ClientID = ""
 					conf.Username = "admin"
 				})
 				It("is valid", func() {
@@ -109,7 +127,7 @@ var _ = Describe("Config", func() {
 				})
 
 				It("should error", func() {
-					Expect(err).To(MatchError("Configuration error: user name is empty"))
+					Expect(err).To(MatchError("Configuration error: username is empty"))
 				})
 			})
 		})
@@ -121,7 +139,7 @@ var _ = Describe("Config", func() {
 
 			Context("when client id is set", func() {
 				BeforeEach(func() {
-					conf.ClientId = "admin"
+					conf.ClientID = "admin"
 					conf.Username = ""
 				})
 				It("is valid", func() {
@@ -131,11 +149,11 @@ var _ = Describe("Config", func() {
 
 			Context("the client id is empty", func() {
 				BeforeEach(func() {
-					conf.ClientId = ""
+					conf.ClientID = ""
 				})
 
 				It("returns error", func() {
-					Expect(err).To(MatchError("Configuration error: client id is empty"))
+					Expect(err).To(MatchError("Configuration error: client_id is empty"))
 				})
 			})
 		})

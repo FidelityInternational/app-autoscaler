@@ -1,26 +1,25 @@
 'use strict'; 
-module.exports = function(configFilePath) {
+module.exports = function(settings, credentialCache, callback) {
   var https = require('https');
   var http = require('http');
   var fs = require('fs');
   var path = require('path');
   var express = require('express');
+  var helmet = require('helmet')
   var bodyParser = require('body-parser');
   var logger = require('./lib/log/logger');
   var HttpStatus = require('http-status-codes');
-  var oauth = require('./lib/oauth/oauth')(configFilePath);
-
-  if (!configFilePath || !fs.existsSync(configFilePath)) {
-      logger.error("Invalid configuration file path: " + configFilePath);
-      throw new Error('configuration file does not exist:' + configFilePath);
-  }
-  var settings = require(path.join(__dirname, './lib/config/setting.js'))((JSON.parse(
-        fs.readFileSync(configFilePath, 'utf8'))));
+  
   var validateResult = settings.validate();
   if (validateResult.valid === false) {
       logger.error("Invalid configuration: " + validateResult.message);
       throw new Error('settings.json is invalid');
   }
+  var serviceBrokerUtil = require('./lib/utils/serviceBrokerUtils')(settings.serviceOffering.serviceBroker);
+  var oauth = require('./lib/oauth/oauth')(settings);
+  var models = require('./lib/models')(settings.db, callback);
+  
+  
   var port = settings.port;
   var publicPort = settings.publicPort;
   
@@ -52,7 +51,7 @@ module.exports = function(configFilePath) {
   if(settings.publicTls){
     if(!fs.existsSync(settings.publicTls.keyFile)){
         logger.error("Invalid public TLS key path: " + settings.publicTls.keyFile);
-        throw new Error("Invalid publicTls key path: " + settings.publicTls.keyFile);
+        throw new Error("Invalid public TLS key path: " + settings.publicTls.keyFile);
     }
     if(!fs.existsSync(settings.publicTls.certFile)){
         logger.error("Invalid public TLS certificate path: " + settings.publicTls.certFile);
@@ -69,30 +68,65 @@ module.exports = function(configFilePath) {
         ca: fs.readFileSync(settings.publicTls.caCertFile)
     }
   }
-
+  var checkBinding = function(req, res, next){
+    if (settings.serviceOffering.enabled) {
+      serviceBrokerUtil.checkBinding(req.params,function(error,result){
+        if(error){
+          res.status(HttpStatus.INTERNAL_SERVER_ERROR).send({});
+        }else{
+          if(result.statusCode == HttpStatus.OK){
+            next();
+          }else if(result.statusCode == HttpStatus.NOT_FOUND){
+            res.status(HttpStatus.FORBIDDEN).send({"error": "The application is not bound to Auto-Scaling service"});
+          }else{
+            res.status(HttpStatus.INTERNAL_SERVER_ERROR).send({});
+          }
+        }
+      });
+    } else {
+      next();
+    }
+  }
   var app = express();
+  app.use(helmet())
+  app.use(helmet.contentSecurityPolicy({
+    directives: {
+      defaultSrc : ['\'self\'' ],
+      scriptSrc : [ '\'self\''],
+    },
+    browserSniff: false
+  }))
+  app.use(helmet.noCache())
   app.use(bodyParser.json());
   app.use(bodyParser.urlencoded({ extended: false }));
   app.use('/health', require('express-healthcheck')());
-  var policies = require('./lib/routes/policies')(settings);
+  var policies = require('./lib/routes/policies')(settings, models);
   var scalingHistories = require('./lib/routes/scalingHistories')(settings);
   var metrics = require('./lib/routes/metrics')(settings);
+  var aggregatedMetrics = require('./lib/routes/aggregated_metrics')(settings);
+  var creds = require('./lib/routes/credentials')(models,credentialCache,settings.cacheTTL);
   app.use('/v1/apps',policies);
-  app.use('/v1/apps',scalingHistories);
-  app.use('/v1/apps',metrics);
+  app.use('/v1/apps',creds);
   app.use(function(err, req, res, next) {
     var errorResponse = {};
     if (err) {
       errorResponse = {
-        'success': false,
         'error': err,
-        'result': null
       };
     }
     res.status(HttpStatus.BAD_REQUEST).json(errorResponse);
   });
 
   var publicApp = express();
+  publicApp.use(helmet())
+  publicApp.use(helmet.contentSecurityPolicy({
+    directives: {
+      defaultSrc : ['\'self\'' ],
+      scriptSrc : [ '\'self\''],
+    },
+    browserSniff: false
+  }))
+  publicApp.use(helmet.noCache())
   publicApp.use(bodyParser.json());
   publicApp.use(bodyParser.urlencoded({ extended: false }));
   publicApp.use('/v1/apps/:app_id/*',function(req, res, next){
@@ -113,19 +147,19 @@ module.exports = function(configFilePath) {
     });
   });
   publicApp.use('/health', require('express-healthcheck')());
-  var policies = require('./lib/routes/policies')(settings);
-  var scalingHistories = require('./lib/routes/scalingHistories')(settings);
-  var metrics = require('./lib/routes/metrics')(settings);
+  var info = require('./lib/routes/info')(settings);
+
+  publicApp.use('/v1/apps/:app_id/policy', checkBinding);
+  publicApp.use('/v1', info);
   publicApp.use('/v1/apps',policies);
   publicApp.use('/v1/apps',scalingHistories);
   publicApp.use('/v1/apps',metrics);
+  publicApp.use('/v1/apps',aggregatedMetrics);
   publicApp.use(function(err, req, res, next) {
     var errorResponse = {};
     if (err) {
       errorResponse = {
-        'success': false,
         'error': err,
-        'result': null
       };
     }
     res.status(HttpStatus.BAD_REQUEST).json(errorResponse);

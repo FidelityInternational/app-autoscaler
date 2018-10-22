@@ -3,29 +3,26 @@ package main_test
 import (
 	"autoscaler/cf"
 	"autoscaler/models"
+	"time"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
 
-	"github.com/hashicorp/consul/api"
 	"github.com/onsi/gomega/gbytes"
 
 	"bytes"
-	"code.cloudfoundry.org/consuladapter"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"os"
-	"time"
 )
 
 var _ = Describe("Main", func() {
 
 	var (
-		runner       *ScalingEngineRunner
-		consulClient consuladapter.Client
+		runner *ScalingEngineRunner
 	)
 
 	BeforeEach(func() {
@@ -37,208 +34,188 @@ var _ = Describe("Main", func() {
 	})
 
 	AfterEach(func() {
-		runner.Interrupt()
+		runner.KillWithFire()
 	})
 
-	It("should start", func() {
-		Consistently(runner.Session).ShouldNot(Exit())
+	Describe("with a correct config", func() {
+
+		Context("when starting 1 scaling engine instance", func() {
+			It("scaling engine should start", func() {
+				Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say(runner.startCheck))
+				Consistently(runner.Session).ShouldNot(Exit())
+			})
+
+			It("http server starts directly", func() {
+				Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say("scalingengine.http-server.new-http-server"))
+			})
+
+			It("health server starts directly", func() {
+				Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say("scalingengine.health-server.new-health-server"))
+			})
+		})
+
+		Context("when starting multiple scaling engine instances", func() {
+			var (
+				secondRunner *ScalingEngineRunner
+			)
+
+			JustBeforeEach(func() {
+				secondRunner = NewScalingEngineRunner()
+				conf.Server.Port += 1
+				conf.Health.Port += 1
+				secondRunner.configPath = writeConfig(&conf).Name()
+				secondRunner.Start()
+			})
+
+			AfterEach(func() {
+				secondRunner.KillWithFire()
+			})
+
+			It("2 http server instances start", func() {
+				Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say("scalingengine.http-server.new-http-server"))
+				Eventually(secondRunner.Session.Buffer, 2*time.Second).Should(gbytes.Say("scalingengine.http-server.new-http-server"))
+				Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say("scalingengine.started"))
+				Eventually(secondRunner.Session.Buffer, 2*time.Second).Should(gbytes.Say("scalingengine.started"))
+
+				Consistently(runner.Session).ShouldNot(Exit())
+				Consistently(secondRunner.Session).ShouldNot(Exit())
+			})
+
+		})
+
+	})
+	Describe("With incorrect config", func() {
+
+		Context("with a missing config file", func() {
+			BeforeEach(func() {
+				runner.startCheck = ""
+				runner.configPath = "bogus"
+			})
+
+			It("fails with an error", func() {
+				Eventually(runner.Session).Should(Exit(1))
+				Expect(runner.Session.Buffer()).To(gbytes.Say("failed to open config file"))
+			})
+		})
+
+		Context("with an invalid config file", func() {
+			BeforeEach(func() {
+				runner.startCheck = ""
+				badfile, err := ioutil.TempFile("", "bad-engine-config")
+				Expect(err).NotTo(HaveOccurred())
+				runner.configPath = badfile.Name()
+				ioutil.WriteFile(runner.configPath, []byte("bogus"), os.ModePerm)
+			})
+
+			AfterEach(func() {
+				os.Remove(runner.configPath)
+			})
+
+			It("fails with an error", func() {
+				Eventually(runner.Session).Should(Exit(1))
+				Expect(runner.Session.Buffer()).To(gbytes.Say("failed to read config file"))
+			})
+		})
+
+		Context("with missing configuration", func() {
+			BeforeEach(func() {
+				runner.startCheck = ""
+				missingParamConf := conf
+				missingParamConf.CF = cf.CFConfig{
+					API: ccUAA.URL(),
+				}
+
+				missingParamConf.Server.Port = 7000 + GinkgoParallelNode()
+				missingParamConf.Logging.Level = "debug"
+
+				cfg := writeConfig(&missingParamConf)
+				runner.configPath = cfg.Name()
+			})
+
+			AfterEach(func() {
+				os.Remove(runner.configPath)
+			})
+
+			It("should fail validation", func() {
+				Eventually(runner.Session).Should(Exit(1))
+				Expect(runner.Session.Buffer()).To(gbytes.Say("failed to validate configuration"))
+			})
+		})
 	})
 
-	Context("with a missing config file", func() {
-		BeforeEach(func() {
-			runner.startCheck = ""
-			runner.configPath = "bogus"
-		})
-
-		It("fails with an error", func() {
-			Eventually(runner.Session).Should(Exit(1))
-			Expect(runner.Session.Buffer()).To(gbytes.Say("failed to open config file"))
-		})
-	})
-
-	Context("with an invalid config file", func() {
-		BeforeEach(func() {
-			runner.startCheck = ""
-			badfile, err := ioutil.TempFile("", "bad-engine-config")
-			Expect(err).NotTo(HaveOccurred())
-			runner.configPath = badfile.Name()
-			ioutil.WriteFile(runner.configPath, []byte("bogus"), os.ModePerm)
-		})
-
-		AfterEach(func() {
-			os.Remove(runner.configPath)
-		})
-
-		It("fails with an error", func() {
-			Eventually(runner.Session).Should(Exit(1))
-			Expect(runner.Session.Buffer()).To(gbytes.Say("failed to read config file"))
-		})
-	})
-
-	Context("with missing configuration", func() {
-		BeforeEach(func() {
-			runner.startCheck = ""
-			missingParamConf := conf
-			missingParamConf.Cf = cf.CfConfig{
-				Api: ccUAA.URL(),
-			}
-
-			missingParamConf.Server.Port = 7000 + GinkgoParallelNode()
-			missingParamConf.Logging.Level = "debug"
-
-			cfg := writeConfig(&missingParamConf)
-			runner.configPath = cfg.Name()
-		})
-
-		AfterEach(func() {
-			os.Remove(runner.configPath)
-		})
-
-		It("should fail validation", func() {
-			Eventually(runner.Session).Should(Exit(1))
-			Expect(runner.Session.Buffer()).To(gbytes.Say("failed to validate configuration"))
-		})
-	})
-
-	Context("Scaling engine is registered with consul", func() {
-		BeforeEach(func() {
-			consulClient = consulRunner.NewClient()
-			runner.startCheck = ""
-		})
+	Describe("when http server is ready to serve RESTful API", func() {
 
 		JustBeforeEach(func() {
-			Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say("scalingengine.registration-runner.succeeded-registering-service"))
-			Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say("scalingengine.started"))
+			Eventually(runner.Session.Buffer, 2).Should(gbytes.Say("scalingengine.started"))
 		})
 
-		It("should get scaling engine service", func() {
-			services, err := consulClient.Agent().Services()
-			Expect(err).ToNot(HaveOccurred())
+		Context("when a request to trigger scaling comes", func() {
+			It("returns with a 200", func() {
+				body, err := json.Marshal(models.Trigger{Adjustment: "+1"})
+				Expect(err).NotTo(HaveOccurred())
 
-			Expect(services).To(HaveKeyWithValue("scalingengine",
-				&api.AgentService{
-					Service: "scalingengine",
-					ID:      "scalingengine",
-					Port:    conf.Server.Port,
-				}))
+				rsp, err := httpClient.Post(fmt.Sprintf("https://127.0.0.1:%d/v1/apps/%s/scale", port, appId),
+					"application/json", bytes.NewReader(body))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rsp.StatusCode).To(Equal(http.StatusOK))
+				rsp.Body.Close()
+			})
 		})
 
-		It("should get status passing", func() {
-			checks, err := consulClient.Agent().Checks()
+		Context("when a request to retrieve scaling history comes", func() {
+			It("returns with a 200", func() {
+				rsp, err := httpClient.Get(fmt.Sprintf("https://127.0.0.1:%d/v1/apps/%s/scaling_histories", port, appId))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rsp.StatusCode).To(Equal(http.StatusOK))
+				rsp.Body.Close()
+			})
+		})
+
+		It("handles the start and end of a schedule", func() {
+			By("start of a schedule")
+			url := fmt.Sprintf("https://127.0.0.1:%d/v1/apps/%s/active_schedules/111111", port, appId)
+			bodyReader := bytes.NewReader([]byte(`{"instance_min_count":1, "instance_max_count":5, "initial_min_instance_count":3}`))
+
+			req, err := http.NewRequest(http.MethodPut, url, bodyReader)
 			Expect(err).NotTo(HaveOccurred())
 
-			Expect(checks).To(HaveKeyWithValue("service:scalingengine",
-				&api.AgentCheck{
-					Node:        "0",
-					CheckID:     "service:scalingengine",
-					Name:        "Service 'scalingengine' check",
-					Status:      "passing",
-					ServiceID:   "scalingengine",
-					ServiceName: "scalingengine",
-				}))
-		})
-	})
-
-	Context("Scaling engine is deregistered with consul", func() {
-		BeforeEach(func() {
-			consulClient = consulRunner.NewClient()
-			runner.startCheck = ""
-		})
-
-		JustBeforeEach(func() {
-			Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say("scalingengine.registration-runner.succeeded-registering-service"))
-			Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say("scalingengine.started"))
-
-			runner.Interrupt()
-		})
-
-		It("should not get scaling engine service", func() {
-			Eventually(func() map[string]*api.AgentService {
-				services, err := consulClient.Agent().Services()
-				Expect(err).ToNot(HaveOccurred())
-
-				return services
-			}).ShouldNot(HaveKey("scalingengine"))
-		})
-	})
-
-	Context("when no consul", func() {
-		BeforeEach(func() {
-			noConsulConf := conf
-			noConsulConf.Consul.Cluster = ""
-			cfg := writeConfig(&noConsulConf)
-			runner.configPath = cfg.Name()
-			runner.startCheck = ""
-			consulClient = consulRunner.NewClient()
-		})
-
-		JustBeforeEach(func() {
-			Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say("scalingengine.started"))
-		})
-
-		AfterEach(func() {
-			os.Remove(runner.configPath)
-		})
-
-		It("should not get scaling engine service", func() {
-			Eventually(func() map[string]*api.AgentService {
-				services, err := consulClient.Agent().Services()
-				Expect(err).ToNot(HaveOccurred())
-
-				return services
-			}).ShouldNot(HaveKey("scalingengine"))
-		})
-	})
-
-	Context("when an interrupt is sent", func() {
-		It("should stop", func() {
-			runner.Session.Interrupt()
-			Eventually(runner.Session, 5).Should(Exit(0))
-		})
-	})
-
-	Describe("when a request to trigger scaling comes", func() {
-		It("returns with a 200", func() {
-			body, err := json.Marshal(models.Trigger{Adjustment: "+1"})
-			Expect(err).NotTo(HaveOccurred())
-
-			rsp, err := httpClient.Post(fmt.Sprintf("https://127.0.0.1:%d/v1/apps/%s/scale", port, appId),
-				"application/json", bytes.NewReader(body))
+			rsp, err := httpClient.Do(req)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(rsp.StatusCode).To(Equal(http.StatusOK))
+			rsp.Body.Close()
+
+			By("end of a schedule")
+			req, err = http.NewRequest(http.MethodDelete, url, nil)
+			Expect(err).NotTo(HaveOccurred())
+
+			rsp, err = httpClient.Do(req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(rsp.StatusCode).To(Equal(http.StatusNoContent))
 			rsp.Body.Close()
 		})
 	})
 
-	Describe("when a request to retrieve scaling history comes", func() {
-		It("returns with a 200", func() {
-			rsp, err := httpClient.Get(fmt.Sprintf("https://127.0.0.1:%d/v1/apps/%s/scaling_histories", port, appId))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(rsp.StatusCode).To(Equal(http.StatusOK))
-			rsp.Body.Close()
+	Describe("when Health server is ready to serve RESTful API", func() {
+		JustBeforeEach(func() {
+			Eventually(runner.Session.Buffer, 2).Should(gbytes.Say("scalingengine.started"))
 		})
-	})
 
-	It("handles the start and end of a schedule", func() {
-		By("start of a schedule")
-		url := fmt.Sprintf("https://127.0.0.1:%d/v1/apps/%s/active_schedules/111111", port, appId)
-		bodyReader := bytes.NewReader([]byte(`{"instance_min_count":1, "instance_max_count":5, "initial_min_instance_count":3}`))
+		Context("when a request to query health comes", func() {
+			It("returns with a 200", func() {
+				rsp, err := healthHttpClient.Get(fmt.Sprintf("http://127.0.0.1:%d/health", healthport))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rsp.StatusCode).To(Equal(http.StatusOK))
+				raw, _ := ioutil.ReadAll(rsp.Body)
+				healthData := string(raw)
+				Expect(healthData).To(ContainSubstring("autoscaler_scalingengine_concurrentHTTPReq"))
+				Expect(healthData).To(ContainSubstring("autoscaler_scalingengine_openConnection_policyDB"))
+				Expect(healthData).To(ContainSubstring("autoscaler_scalingengine_openConnection_scalingEngineDB"))
+				Expect(healthData).To(ContainSubstring("autoscaler_scalingengine_openConnection_schedulerDB"))
+				Expect(healthData).To(ContainSubstring("go_goroutines"))
+				Expect(healthData).To(ContainSubstring("go_memstats_alloc_bytes"))
+				rsp.Body.Close()
 
-		req, err := http.NewRequest(http.MethodPut, url, bodyReader)
-		Expect(err).NotTo(HaveOccurred())
-
-		rsp, err := httpClient.Do(req)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(rsp.StatusCode).To(Equal(http.StatusOK))
-		rsp.Body.Close()
-
-		By("end of a schedule")
-		req, err = http.NewRequest(http.MethodDelete, url, nil)
-		Expect(err).NotTo(HaveOccurred())
-
-		rsp, err = httpClient.Do(req)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(rsp.StatusCode).To(Equal(http.StatusNoContent))
-		rsp.Body.Close()
+			})
+		})
 	})
 })

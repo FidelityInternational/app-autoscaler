@@ -7,6 +7,9 @@ var fs = require("fs");
 var path = require("path");
 var HttpStatus = require('http-status-codes');
 
+var configFilePath = path.join(__dirname, '../../../config/settings.json');
+var settings = require(path.join(__dirname, '../../../lib/config/setting.js'))((JSON.parse(
+  fs.readFileSync(configFilePath, 'utf8'))));
 var logger = require("../../../lib/log/logger");
 var oauth;
 var nock = require("nock");
@@ -18,7 +21,7 @@ describe("Oauth", function() {
   
   beforeEach(function() {
     nock.cleanAll();
-    oauth = require("../../../lib/oauth/oauth")(path.join(__dirname, "../../../config/settings.json"));
+    oauth = require("../../../lib/oauth/oauth")(settings);
     req = {
       protocol: "https",
       host: "app.bosh-lite.com",
@@ -90,7 +93,7 @@ describe("Oauth", function() {
       beforeEach(function() {
         nock("https://api.bosh-lite.com")
           .get("/v2/info")
-          .reply(HttpStatus.OK, { "authorization_endpoint": "https://uaa.bosh-lite.com" });
+          .reply(HttpStatus.OK, { "token_endpoint": "https://uaa.bosh-lite.com" });
       });
       it("should return error", function(done) {
         oauth.checkUserAuthorization(req, function(error, result) {
@@ -105,7 +108,7 @@ describe("Oauth", function() {
       beforeEach(function() {
         nock("https://api.bosh-lite.com")
           .get("/v2/info")
-          .reply(HttpStatus.OK, { "authorization_endpoint": "https://uaa.bosh-lite.com" });
+          .reply(HttpStatus.OK, { "token_endpoint": "https://uaa.bosh-lite.com" });
 
         nock("https://uaa.bosh-lite.com")
           .get("/userinfo")
@@ -126,7 +129,7 @@ describe("Oauth", function() {
       beforeEach(function() {
         nock("https://api.bosh-lite.com")
           .get("/v2/info")
-          .reply(HttpStatus.OK, { "authorization_endpoint": "https://uaa.bosh-lite.com" });
+          .reply(HttpStatus.OK, { "token_endpoint": "https://uaa.bosh-lite.com" });
 
         nock("https://uaa.bosh-lite.com")
           .get("/userinfo")
@@ -148,7 +151,7 @@ describe("Oauth", function() {
       beforeEach(function() {
         nock("https://api.bosh-lite.com/v2/info")
           .get("*")
-          .reply(HttpStatus.OK, { "authorization_endpoint": "https://uaa.bosh-lite.com" });
+          .reply(HttpStatus.OK, { "token_endpoint": "https://uaa.bosh-lite.com" });
 
         nock("https://uaa.bosh-lite.com")
           .get("/userinfo")
@@ -167,7 +170,7 @@ describe("Oauth", function() {
       beforeEach(function() {
         nock("https://api.bosh-lite.com")
           .get("/v2/info")
-          .reply(HttpStatus.OK, { "authorization_endpoint": "https://uaa.bosh-lite.com" });
+          .reply(HttpStatus.OK, { "token_endpoint": "https://uaa.bosh-lite.com" });
 
         nock("https://uaa.bosh-lite.com")
           .get("/userinfo")
@@ -191,7 +194,7 @@ describe("Oauth", function() {
       beforeEach(function() {
         nock("https://api.bosh-lite.com")
           .get("/v2/info")
-          .reply(HttpStatus.OK, { "authorization_endpoint": "https://uaa.bosh-lite.com" });
+          .reply(HttpStatus.OK, { "token_endpoint": "https://uaa.bosh-lite.com" });
 
         nock("https://uaa.bosh-lite.com")
           .get("/userinfo")
@@ -218,7 +221,7 @@ describe("Oauth", function() {
       beforeEach(function() {
         nock("https://api.bosh-lite.com")
           .get("/v2/info")
-          .reply(HttpStatus.OK, { "authorization_endpoint": "https://uaa.bosh-lite.com" });
+          .reply(HttpStatus.OK, { "token_endpoint": "https://uaa.bosh-lite.com" });
 
         nock("https://uaa.bosh-lite.com")
           .get("/userinfo")
@@ -249,7 +252,7 @@ describe("Oauth", function() {
       beforeEach(function() {
         nock("https://api.bosh-lite.com")
           .get("/v2/info")
-          .reply(HttpStatus.OK, { "authorization_endpoint": "https://uaa.bosh-lite.com" });
+          .reply(HttpStatus.OK, { "token_endpoint": "https://uaa.bosh-lite.com" });
 
         nock("https://uaa.bosh-lite.com")
           .get("/userinfo")

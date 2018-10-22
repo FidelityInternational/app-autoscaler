@@ -1,19 +1,23 @@
 package generator_test
 
 import (
+	"autoscaler/db"
 	"autoscaler/eventgenerator/aggregator/fakes"
 	. "autoscaler/eventgenerator/generator"
 	"autoscaler/models"
 	"autoscaler/routes"
 	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"code.cloudfoundry.org/cfhttp"
 	"code.cloudfoundry.org/lager/lagertest"
+	"github.com/cenk/backoff"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/ghttp"
+	"github.com/rubyist/circuitbreaker"
 )
 
 var _ = Describe("Evaluator", func() {
@@ -21,20 +25,28 @@ var _ = Describe("Evaluator", func() {
 		fakeBreachDurationSecs = 300
 	)
 	var (
-		logger         *lagertest.TestLogger
-		httpClient     *http.Client
-		triggerChan    chan []*models.Trigger
-		database       *fakes.FakeAppMetricDB
-		scalingEngine  *ghttp.Server
-		evaluator      *Evaluator
-		testAppId      string = "testAppId"
-		testMetricType string = "testMetricType"
-		testMetricUnit string = "testMetricUnit"
-		urlPath        string
-		triggerArrayGT []*models.Trigger = []*models.Trigger{{
+		logger             *lagertest.TestLogger
+		httpClient         *http.Client
+		triggerChan        chan []*models.Trigger
+		database           *fakes.FakeAppMetricDB
+		scalingEngine      *ghttp.Server
+		evaluator          *Evaluator
+		testAppId          string = "testAppId"
+		testMetricType     string = "testMetricType"
+		testMetricUnit     string = "testMetricUnit"
+		urlPath            string
+		breachDurationSecs int = 30
+		getBreaker         func(string) *circuit.Breaker
+		setCoolDownExpired func(string, int64)
+		cbEventChan        <-chan circuit.BreakerEvent
+		cooldownExpired    map[string]int64
+		fakeTime           time.Time   = time.Now()
+		lock               *sync.Mutex = &sync.Mutex{}
+		scalingResult      *models.AppScalingResult
+		triggerArrayGT     []*models.Trigger = []*models.Trigger{{
 			AppId:                 testAppId,
 			MetricType:            testMetricType,
-			BreachDurationSeconds: 300,
+			BreachDurationSeconds: breachDurationSecs,
 			CoolDownSeconds:       300,
 			Threshold:             500,
 			Operator:              ">",
@@ -43,7 +55,7 @@ var _ = Describe("Evaluator", func() {
 		triggerArrayGE []*models.Trigger = []*models.Trigger{{
 			AppId:                 testAppId,
 			MetricType:            testMetricType,
-			BreachDurationSeconds: 300,
+			BreachDurationSeconds: breachDurationSecs,
 			CoolDownSeconds:       300,
 			Threshold:             500,
 			Operator:              ">=",
@@ -52,7 +64,7 @@ var _ = Describe("Evaluator", func() {
 		triggerArrayLT []*models.Trigger = []*models.Trigger{{
 			AppId:                 testAppId,
 			MetricType:            testMetricType,
-			BreachDurationSeconds: 300,
+			BreachDurationSeconds: breachDurationSecs,
 			CoolDownSeconds:       300,
 			Threshold:             500,
 			Operator:              "<",
@@ -61,7 +73,7 @@ var _ = Describe("Evaluator", func() {
 		triggerArrayLE []*models.Trigger = []*models.Trigger{{
 			AppId:                 testAppId,
 			MetricType:            testMetricType,
-			BreachDurationSeconds: 300,
+			BreachDurationSeconds: breachDurationSecs,
 			CoolDownSeconds:       300,
 			Threshold:             500,
 			Operator:              "<=",
@@ -72,7 +84,7 @@ var _ = Describe("Evaluator", func() {
 			AppId:                 testAppId,
 			MetricType:            testMetricType,
 			MetricUnit:            testMetricUnit,
-			BreachDurationSeconds: 300,
+			BreachDurationSeconds: breachDurationSecs,
 			CoolDownSeconds:       300,
 			Threshold:             500,
 			Operator:              ">=",
@@ -83,192 +95,50 @@ var _ = Describe("Evaluator", func() {
 			AppId:                 testAppId,
 			MetricType:            testMetricType,
 			MetricUnit:            testMetricUnit,
-			BreachDurationSeconds: 300,
+			BreachDurationSeconds: breachDurationSecs,
 			CoolDownSeconds:       300,
 			Threshold:             500,
 			Operator:              "<=",
 			Adjustment:            "-1",
 		}
 		triggerArrayMultipleTriggers []*models.Trigger = []*models.Trigger{&firstTrigger, &secondTrigger}
-
-		//test appmetric for >
-		appMetricGTBreach []*models.AppMetric = []*models.AppMetric{
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "600",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "650",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "620",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-		}
-		appMetricGTNotBreach []*models.AppMetric = []*models.AppMetric{
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "200",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "150",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "600",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-		}
-
-		//test appmetric for >=
-		appMetricGEBreach []*models.AppMetric = []*models.AppMetric{
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "600",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "500",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "700",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-		}
-		appMetricGENotBreach []*models.AppMetric = []*models.AppMetric{
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "200",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "500",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "120",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-		}
-
-		//test appmetric for <
-		appMetricLTNotBreach []*models.AppMetric = []*models.AppMetric{
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "600",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "300",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "200",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-		}
-		appMetricLTBreach []*models.AppMetric = []*models.AppMetric{
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "200",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "150",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "320",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-		}
-
-		//test appmetric for <=
-		appMetricLENotBreach []*models.AppMetric = []*models.AppMetric{
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "600",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "500",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "300",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-		}
-		appMetricLEBreach []*models.AppMetric = []*models.AppMetric{
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "500",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "300",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "200",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-		}
-
-		appMetricMultipleTriggerAllBreach []*models.AppMetric = []*models.AppMetric{
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "500",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "500",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-			{AppId: testAppId,
-				MetricType: testMetricType,
-				Value:      "500",
-				Unit:       testMetricUnit,
-				Timestamp:  time.Now().UnixNano()},
-		}
 	)
 	BeforeEach(func() {
 		logger = lagertest.NewTestLogger("Evaluator-test")
 		httpClient = cfhttp.NewClient()
 		triggerChan = make(chan []*models.Trigger, 1)
 		database = &fakes.FakeAppMetricDB{}
-		scalingEngine = nil
 
 		path, err := routes.ScalingEngineRoutes().Get(routes.ScaleRouteName).URLPath("appid", testAppId)
 		Expect(err).NotTo(HaveOccurred())
 		urlPath = path.Path
 
+		getBreaker = func(appID string) *circuit.Breaker {
+			return nil
+		}
+
+		scalingResult = &models.AppScalingResult{
+			AppId:             testAppId,
+			Adjustment:        1,
+			Status:            models.ScalingStatusSucceeded,
+			CooldownExpiredAt: fakeTime.Add(time.Duration(300) * time.Second).UnixNano(),
+		}
+
+		cooldownExpired = map[string]int64{}
+		setCoolDownExpired = func(appId string, expiredAt int64) {
+			lock.Lock()
+			defer lock.Unlock()
+			cooldownExpired[appId] = expiredAt
+		}
+
+	})
+	AfterEach(func() {
+		close(triggerChan)
 	})
 
 	Context("Start", func() {
 		JustBeforeEach(func() {
-			evaluator = NewEvaluator(logger, httpClient, scalingEngine.URL(), triggerChan, database, fakeBreachDurationSecs)
+			evaluator = NewEvaluator(logger, httpClient, scalingEngine.URL(), triggerChan, database, fakeBreachDurationSecs, getBreaker, setCoolDownExpired)
 			evaluator.Start()
 		})
 
@@ -285,9 +155,10 @@ var _ = Describe("Evaluator", func() {
 
 			Context("retrieve appMatrics", func() {
 				BeforeEach(func() {
+					appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{600, 650, 620}, breachDurationSecs, true)
 					scalingEngine.RouteToHandler("POST", urlPath, ghttp.RespondWith(http.StatusOK, "successful"))
-					database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-						return appMetricGTBreach, nil
+					database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+						return appMetrics, nil
 					}
 					Expect(triggerChan).To(BeSent(triggerArrayGT))
 				})
@@ -296,10 +167,23 @@ var _ = Describe("Evaluator", func() {
 					Eventually(database.RetrieveAppMetricsCallCount).Should(Equal(1))
 				})
 			})
-
-			Context("operators", func() {
+			Context("when the appMetrics are not enough", func() {
 				BeforeEach(func() {
 					scalingEngine.RouteToHandler("POST", urlPath, ghttp.RespondWith(http.StatusOK, "successful"))
+					Expect(triggerChan).To(BeSent(triggerArrayGT))
+					appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{600, 650, 620}, breachDurationSecs, false)
+					database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+						return appMetrics, nil
+					}
+				})
+				It("should not send trigger alarm to scaling engine", func() {
+					Consistently(scalingEngine.ReceivedRequests).Should(HaveLen(0))
+					Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("the appmetrics are not enough for evaluation")))
+				})
+			})
+			Context("operators", func() {
+				BeforeEach(func() {
+					scalingEngine.RouteToHandler("POST", urlPath, ghttp.RespondWithJSONEncoded(http.StatusOK, &scalingResult))
 				})
 				Context(">", func() {
 					BeforeEach(func() {
@@ -307,29 +191,33 @@ var _ = Describe("Evaluator", func() {
 					})
 					Context("when the appMetrics breach the trigger", func() {
 						BeforeEach(func() {
-							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-								return appMetricGTBreach, nil
+							appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{600, 650, 620}, breachDurationSecs, true)
+							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+								return appMetrics, nil
 							}
 						})
 						It("should send trigger alarm to scaling engine", func() {
 							Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(1))
 							Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("send trigger alarm to scaling engine")))
 						})
+
 					})
 					Context("when the appMetrics do not breach the trigger", func() {
 						BeforeEach(func() {
-							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-								return appMetricGTNotBreach, nil
+							appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{200, 150, 600}, breachDurationSecs, true)
+							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+								return appMetrics, nil
 							}
 						})
 						It("should not send trigger alarm to scaling engine", func() {
 							Consistently(scalingEngine.ReceivedRequests).Should(HaveLen(0))
 							Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("should not send trigger alarm to scaling engine")))
 						})
+
 					})
 					Context("when appMetrics is empty", func() {
 						BeforeEach(func() {
-							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
+							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
 								return []*models.AppMetric{}, nil
 							}
 						})
@@ -338,15 +226,16 @@ var _ = Describe("Evaluator", func() {
 							Consistently(scalingEngine.ReceivedRequests).Should(HaveLen(0))
 						})
 					})
-					Context("when the appMetrics contain  empty value elements", func() {
+					Context("when the appMetrics contain empty value elements", func() {
 						BeforeEach(func() {
-							appMetricNilValue := append(appMetricGTBreach, &models.AppMetric{AppId: testAppId,
+							appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{600, 650, 620}, breachDurationSecs, true)
+							appMetrics = append(appMetrics, &models.AppMetric{AppId: testAppId,
 								MetricType: testMetricType,
 								Value:      "",
 								Unit:       "",
 								Timestamp:  time.Now().UnixNano()})
-							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-								return appMetricNilValue, nil
+							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+								return appMetrics, nil
 							}
 						})
 						It("should not send trigger alarm to scaling engine", func() {
@@ -359,31 +248,36 @@ var _ = Describe("Evaluator", func() {
 					BeforeEach(func() {
 						Expect(triggerChan).To(BeSent(triggerArrayGE))
 					})
+
 					Context("when the appMetrics breach the trigger", func() {
 						BeforeEach(func() {
-							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-								return appMetricGEBreach, nil
+							appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{600, 500, 500}, breachDurationSecs, true)
+							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+								return appMetrics, nil
 							}
 						})
 						It("should send trigger alarm to scaling engine", func() {
 							Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(1))
 							Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("send trigger alarm to scaling engine")))
 						})
+
 					})
 					Context("when the appMetrics do not breach the trigger", func() {
 						BeforeEach(func() {
-							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-								return appMetricGENotBreach, nil
+							appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{200, 150, 600}, breachDurationSecs, true)
+							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+								return appMetrics, nil
 							}
 						})
 						It("should not send trigger alarm to scaling engine", func() {
 							Consistently(scalingEngine.ReceivedRequests).Should(HaveLen(0))
 							Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("should not send trigger alarm to scaling engine")))
 						})
+
 					})
 					Context("when appMetrics is empty", func() {
 						BeforeEach(func() {
-							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
+							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
 								return []*models.AppMetric{}, nil
 							}
 						})
@@ -392,15 +286,16 @@ var _ = Describe("Evaluator", func() {
 							Consistently(scalingEngine.ReceivedRequests).Should(HaveLen(0))
 						})
 					})
-					Context("when the appMetrics contain empty value elements", func() {
+					Context("when the appMetrics contain  empty value elements", func() {
 						BeforeEach(func() {
-							appMetricNilValue := append(appMetricGEBreach, &models.AppMetric{AppId: testAppId,
+							appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{600, 500, 500}, breachDurationSecs, true)
+							appMetrics = append(appMetrics, &models.AppMetric{AppId: testAppId,
 								MetricType: testMetricType,
 								Value:      "",
 								Unit:       "",
 								Timestamp:  time.Now().UnixNano()})
-							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-								return appMetricNilValue, nil
+							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+								return appMetrics, nil
 							}
 						})
 						It("should not send trigger alarm to scaling engine", func() {
@@ -415,29 +310,33 @@ var _ = Describe("Evaluator", func() {
 					})
 					Context("when the appMetrics breach the trigger", func() {
 						BeforeEach(func() {
-							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-								return appMetricLTBreach, nil
+							appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{200, 300, 400}, breachDurationSecs, true)
+							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+								return appMetrics, nil
 							}
 						})
 						It("should send trigger alarm to scaling engine", func() {
 							Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(1))
 							Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("send trigger alarm to scaling engine")))
 						})
+
 					})
 					Context("when the appMetrics do not breach the trigger", func() {
 						BeforeEach(func() {
-							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-								return appMetricLTNotBreach, nil
+							appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{500, 550, 600}, breachDurationSecs, true)
+							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+								return appMetrics, nil
 							}
 						})
 						It("should not send trigger alarm to scaling engine", func() {
 							Consistently(scalingEngine.ReceivedRequests).Should(HaveLen(0))
 							Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("should not send trigger alarm to scaling engine")))
 						})
+
 					})
 					Context("when appMetrics is empty", func() {
 						BeforeEach(func() {
-							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
+							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
 								return []*models.AppMetric{}, nil
 							}
 						})
@@ -446,15 +345,16 @@ var _ = Describe("Evaluator", func() {
 							Consistently(scalingEngine.ReceivedRequests).Should(HaveLen(0))
 						})
 					})
-					Context("when the appMetrics contain empty value elements", func() {
+					Context("when the appMetrics contain  empty value elements", func() {
 						BeforeEach(func() {
-							appMetricNilValue := append(appMetricLTBreach, &models.AppMetric{AppId: testAppId,
+							appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{200, 300, 400}, breachDurationSecs, true)
+							appMetrics = append(appMetrics, &models.AppMetric{AppId: testAppId,
 								MetricType: testMetricType,
 								Value:      "",
 								Unit:       "",
 								Timestamp:  time.Now().UnixNano()})
-							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-								return appMetricNilValue, nil
+							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+								return appMetrics, nil
 							}
 						})
 						It("should not send trigger alarm to scaling engine", func() {
@@ -469,29 +369,33 @@ var _ = Describe("Evaluator", func() {
 					})
 					Context("when the appMetrics breach the trigger", func() {
 						BeforeEach(func() {
-							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-								return appMetricLEBreach, nil
+							appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{200, 500, 500}, breachDurationSecs, true)
+							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+								return appMetrics, nil
 							}
 						})
 						It("should send trigger alarm to scaling engine", func() {
 							Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(1))
 							Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("send trigger alarm to scaling engine")))
 						})
+
 					})
 					Context("when the appMetrics do not breach the trigger", func() {
 						BeforeEach(func() {
-							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-								return appMetricLENotBreach, nil
+							appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{500, 550, 600}, breachDurationSecs, true)
+							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+								return appMetrics, nil
 							}
 						})
 						It("should not send trigger alarm to scaling engine", func() {
 							Consistently(scalingEngine.ReceivedRequests).Should(HaveLen(0))
 							Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("should not send trigger alarm to scaling engine")))
 						})
+
 					})
 					Context("when appMetrics is empty", func() {
 						BeforeEach(func() {
-							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
+							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
 								return []*models.AppMetric{}, nil
 							}
 						})
@@ -500,15 +404,16 @@ var _ = Describe("Evaluator", func() {
 							Consistently(scalingEngine.ReceivedRequests).Should(HaveLen(0))
 						})
 					})
-					Context("when the appMetrics contain empty value elements", func() {
+					Context("when the appMetrics contain  empty value elements", func() {
 						BeforeEach(func() {
-							appMetricNilValue := append(appMetricLEBreach, &models.AppMetric{AppId: testAppId,
+							appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{200, 500, 500}, breachDurationSecs, true)
+							appMetrics = append(appMetrics, &models.AppMetric{AppId: testAppId,
 								MetricType: testMetricType,
 								Value:      "",
 								Unit:       "",
 								Timestamp:  time.Now().UnixNano()})
-							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-								return appMetricNilValue, nil
+							database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+								return appMetrics, nil
 							}
 						})
 						It("should not send trigger alarm to scaling engine", func() {
@@ -529,17 +434,19 @@ var _ = Describe("Evaluator", func() {
 							ghttp.CombineHandlers(
 								ghttp.VerifyRequest("POST", urlPath),
 								ghttp.VerifyJSONRepresenting(firstTrigger),
-								ghttp.RespondWith(http.StatusOK, ""),
+								ghttp.RespondWithJSONEncoded(http.StatusOK, &scalingResult),
 							),
 						)
-
-						database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-							return appMetricGEBreach, nil
+						appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{500, 550, 600}, breachDurationSecs, true)
+						database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+							return appMetrics, nil
 						}
 					})
 					It("should send alarm of first trigger to scaling engine", func() {
 						Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(1))
 						Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("send trigger alarm to scaling engine")))
+						Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("successfully-send-trigger-alarm with trigger")))
+
 					})
 				})
 
@@ -549,17 +456,19 @@ var _ = Describe("Evaluator", func() {
 							ghttp.CombineHandlers(
 								ghttp.VerifyRequest("POST", urlPath),
 								ghttp.VerifyJSONRepresenting(secondTrigger),
-								ghttp.RespondWith(http.StatusOK, ""),
+								ghttp.RespondWithJSONEncoded(http.StatusOK, &scalingResult),
 							),
 						)
-
-						database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-							return appMetricLEBreach, nil
+						appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{300, 400, 500}, breachDurationSecs, true)
+						database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+							return appMetrics, nil
 						}
 					})
 					It("should send alarm  of second trigger to scaling engine", func() {
 						Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(1))
 						Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("send trigger alarm to scaling engine")))
+						Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("successfully-send-trigger-alarm with trigger")))
+
 					})
 				})
 
@@ -569,36 +478,125 @@ var _ = Describe("Evaluator", func() {
 							ghttp.CombineHandlers(
 								ghttp.VerifyRequest("POST", urlPath),
 								ghttp.VerifyJSONRepresenting(firstTrigger),
-								ghttp.RespondWith(http.StatusOK, ""),
+								ghttp.RespondWithJSONEncoded(http.StatusOK, &scalingResult),
 							),
 						)
-						database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-							return appMetricMultipleTriggerAllBreach, nil
+						appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{500, 500, 500}, breachDurationSecs, true)
+						database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+							return appMetrics, nil
 						}
 					})
 					It("should send alarm of first trigger to scaling engine", func() {
 						Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(1))
 						Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("send trigger alarm to scaling engine")))
+						Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("successfully-send-trigger-alarm with trigger")))
 					})
 				})
 
 			})
 
-			Context("send trigger failed", func() {
+			Context("sending trigger ", func() {
 				BeforeEach(func() {
-					database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-						return appMetricGTBreach, nil
+					appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{600, 650, 620}, breachDurationSecs, true)
+					database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+						return appMetrics, nil
 					}
+					Expect(triggerChan).To(BeSent(triggerArrayGT))
 				})
+
+				Context("when the scaling engine returns 200 with different scalingResults", func() {
+					Context("when cooldownExpiredAt is set to a valid timestamp in scalingResult ", func() {
+						BeforeEach(func() {
+							scalingEngine.AppendHandlers(
+								ghttp.CombineHandlers(
+									ghttp.VerifyRequest("POST", urlPath),
+									ghttp.RespondWithJSONEncoded(http.StatusOK, &scalingResult),
+								),
+							)
+						})
+
+						It("should succeed to set cooldownExpiredAt map", func() {
+							Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(1))
+							Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("send trigger alarm to scaling engine")))
+							Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("successfully-send-trigger-alarm with trigger")))
+							lock.Lock()
+							Eventually(cooldownExpired).Should(HaveLen(1))
+							Eventually(cooldownExpired[testAppId]).Should(Equal(fakeTime.Add(time.Duration(300) * time.Second).UnixNano()))
+							lock.Unlock()
+						})
+					})
+
+					Context("when cooldownExpiredAt is 0 in scalingResult", func() {
+						BeforeEach(func() {
+							scalingResult.CooldownExpiredAt = 0
+
+							scalingEngine.AppendHandlers(
+								ghttp.CombineHandlers(
+									ghttp.VerifyRequest("POST", urlPath),
+									ghttp.RespondWithJSONEncoded(http.StatusOK, &scalingResult),
+								),
+							)
+						})
+
+						It("should be no record in coolDownExpiredAt map", func() {
+							Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(1))
+							Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("send trigger alarm to scaling engine")))
+							Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("successfully-send-trigger-alarm with trigger")))
+							lock.Lock()
+							Eventually(cooldownExpired).Should(HaveLen(0))
+							lock.Unlock()
+						})
+					})
+
+					Context("when cooldownExpiredAt is not set in scalingResult", func() {
+						BeforeEach(func() {
+							scalingEngine.AppendHandlers(
+								ghttp.CombineHandlers(
+									ghttp.VerifyRequest("POST", urlPath),
+									ghttp.RespondWith(http.StatusOK, "{\"app_id\":\"testAppId\"}"),
+								),
+							)
+						})
+
+						It("should be no record in coolDownExpiredAt map", func() {
+							Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(1))
+							Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("send trigger alarm to scaling engine")))
+							Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("successfully-send-trigger-alarm with trigger")))
+							lock.Lock()
+							Eventually(cooldownExpired).Should(HaveLen(0))
+							lock.Unlock()
+						})
+					})
+
+					Context("when response is not a valid type scalingResult", func() {
+						BeforeEach(func() {
+							scalingEngine.AppendHandlers(
+								ghttp.CombineHandlers(
+									ghttp.VerifyRequest("POST", urlPath),
+									ghttp.RespondWith(http.StatusOK, "succeed"),
+								),
+							)
+						})
+
+						It("should be no record in coolDownExpiredAt map", func() {
+							Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(1))
+							Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("send trigger alarm to scaling engine")))
+							Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("successfully-send-trigger-alarm, but received wrong response")))
+							lock.Lock()
+							Eventually(cooldownExpired).Should(HaveLen(0))
+							lock.Unlock()
+						})
+					})
+				})
+
 				Context("when the scaling engine returns error", func() {
 					BeforeEach(func() {
 						scalingEngine.RouteToHandler("POST", urlPath, ghttp.RespondWithJSONEncoded(http.StatusBadRequest, "error"))
-						Expect(triggerChan).To(BeSent(triggerArrayGT))
 					})
 
 					It("should log the error", func() {
 						Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(1))
-						Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("scaling engine error,failed to send trigger alarm")))
+						Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("failed-send-trigger-alarm")))
 					})
 				})
 
@@ -613,19 +611,107 @@ var _ = Describe("Evaluator", func() {
 							errorStr = errorStr + tmp
 						}
 						scalingEngine.RouteToHandler("POST", urlPath, ghttp.RespondWithJSONEncoded(http.StatusBadRequest, errorStr))
-						Expect(triggerChan).To(BeSent(triggerArrayGT))
 					})
 
 					It("should log the error", func() {
 						Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(1))
-						Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("failed to read body from scaling engine's response")))
+						Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("failed-read-response-body-from-scaling-engine")))
 					})
+				})
+
+			})
+
+			Context("circuit break for scaling failures", func() {
+				BeforeEach(func() {
+					appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{600, 650, 620}, breachDurationSecs, true)
+					database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+						return appMetrics, nil
+					}
+					bf := backoff.NewExponentialBackOff()
+					bf.InitialInterval = 500 * time.Millisecond
+					bf.MaxInterval = 1 * time.Second
+					bf.MaxElapsedTime = 0
+					bf.RandomizationFactor = 0
+					bf.Multiplier = 2
+					bf.Reset()
+					breaker := circuit.NewBreakerWithOptions(&circuit.Options{
+						BackOff:    bf,
+						ShouldTrip: circuit.ConsecutiveTripFunc(1),
+					})
+					cbEventChan = breaker.Subscribe()
+					getBreaker = func(appID string) *circuit.Breaker {
+						return breaker
+					}
+				})
+				It("open and close the circuit breaker", func() {
+					By("scaling failure causes circuit breaker to be open")
+					scalingEngine.RouteToHandler("POST", urlPath, ghttp.RespondWithJSONEncoded(http.StatusBadRequest, "error"))
+					Expect(triggerChan).To(BeSent(triggerArrayGT))
+					Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(1))
+					Eventually(cbEventChan).Should(Receive(Equal(circuit.BreakerFail)))
+					Eventually(cbEventChan).Should(Receive(Equal(circuit.BreakerTripped)))
+
+					By("return directly when circuit breaker is open")
+					Expect(triggerChan).To(BeSent(triggerArrayGT))
+					Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("circuit-tripped")))
+					Consistently(scalingEngine.ReceivedRequests).Should(HaveLen(1))
+
+					By("circuit breaker becomes half open when timeout")
+					time.Sleep(500 * time.Millisecond)
+					Expect(triggerChan).To(BeSent(triggerArrayGT))
+					Eventually(cbEventChan).Should(Receive(Equal(circuit.BreakerReady)))
+					Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(2))
+
+					By("circuit breaker goes to open again for retry failuer")
+					Eventually(cbEventChan).Should(Receive(Equal(circuit.BreakerFail)))
+					Expect(triggerChan).To(BeSent(triggerArrayGT))
+					Consistently(scalingEngine.ReceivedRequests).Should(HaveLen(2))
+
+					By("circuit breaker doubles the timeout interval")
+					time.Sleep(500 * time.Millisecond)
+					Expect(triggerChan).To(BeSent(triggerArrayGT))
+					Consistently(scalingEngine.ReceivedRequests).Should(HaveLen(2))
+
+					By("circuit breaker becomes half open second time when time out")
+					time.Sleep(500 * time.Millisecond)
+					Expect(triggerChan).To(BeSent(triggerArrayGT))
+					Eventually(cbEventChan).Should(Receive(Equal(circuit.BreakerReady)))
+					Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(3))
+					Eventually(cbEventChan).Should(Receive(Equal(circuit.BreakerFail)))
+
+					By("circuit breaker caps the next timeout interval")
+					time.Sleep(1 * time.Second)
+					Expect(triggerChan).To(BeSent(triggerArrayGT))
+					Eventually(cbEventChan).Should(Receive(Equal(circuit.BreakerReady)))
+					Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(4))
+					Eventually(cbEventChan).Should(Receive(Equal(circuit.BreakerFail)))
+
+					By("circuit breaker becomes closed due to successful scaling")
+					scalingEngine.RouteToHandler("POST", urlPath, ghttp.RespondWithJSONEncoded(http.StatusOK, &scalingResult))
+					time.Sleep(1 * time.Second)
+					Expect(triggerChan).To(BeSent(triggerArrayGT))
+					Eventually(cbEventChan).Should(Receive(Equal(circuit.BreakerReady)))
+					Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(5))
+
+					By("Circuit breaker sends request to scaling engine when it is closed")
+					Expect(triggerChan).To(BeSent(triggerArrayGT))
+					Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(6))
+
+					By("Circuit breaker resets timeout interval when it is closed ")
+					scalingEngine.RouteToHandler("POST", urlPath, ghttp.RespondWithJSONEncoded(http.StatusBadRequest, "error"))
+					Expect(triggerChan).To(BeSent(triggerArrayGT))
+					Eventually(scalingEngine.ReceivedRequests).Should(HaveLen(7))
+					Eventually(cbEventChan).Should(Receive(Equal(circuit.BreakerFail)))
+					Eventually(cbEventChan).Should(Receive(Equal(circuit.BreakerTripped)))
+					time.Sleep(500 * time.Millisecond)
+					Expect(triggerChan).To(BeSent(triggerArrayGT))
+					Eventually(cbEventChan).Should(Receive(Equal(circuit.BreakerReady)))
 				})
 			})
 
-			Context("when retrieve appMetrics from database failed", func() {
+			Context("when retrieving appMetrics from database failed", func() {
 				BeforeEach(func() {
-					database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
+					database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
 						return nil, errors.New("error when retrieve appMetrics from database")
 					}
 				})
@@ -640,7 +726,7 @@ var _ = Describe("Evaluator", func() {
 					invalidTriggerArray := []*models.Trigger{{
 						AppId:                 testAppId,
 						MetricType:            testMetricType,
-						BreachDurationSeconds: 300,
+						BreachDurationSeconds: breachDurationSecs,
 						CoolDownSeconds:       300,
 						Threshold:             500,
 						Operator:              "invalid_operator",
@@ -661,10 +747,10 @@ var _ = Describe("Evaluator", func() {
 	Context("Stop", func() {
 		BeforeEach(func() {
 			scalingEngine = ghttp.NewServer()
-			database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
+			database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
 				return nil, errors.New("no alarm")
 			}
-			evaluator = NewEvaluator(logger, httpClient, scalingEngine.URL(), triggerChan, database, fakeBreachDurationSecs)
+			evaluator = NewEvaluator(logger, httpClient, scalingEngine.URL(), triggerChan, database, fakeBreachDurationSecs, getBreaker, setCoolDownExpired)
 			evaluator.Start()
 			Expect(triggerChan).To(BeSent(triggerArrayGT))
 			Eventually(database.RetrieveAppMetricsCallCount).Should(Equal(1))
@@ -680,10 +766,11 @@ var _ = Describe("Evaluator", func() {
 	Context("Scaling Engine is not reachable", func() {
 		BeforeEach(func() {
 			scalingEngine = ghttp.NewUnstartedServer()
-			database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64) ([]*models.AppMetric, error) {
-				return appMetricGTBreach, nil
+			appMetrics := generateTestAppMetrics(testAppId, testMetricType, testMetricUnit, []int64{600, 650, 620}, breachDurationSecs, true)
+			database.RetrieveAppMetricsStub = func(appId string, metricType string, start int64, end int64, order db.OrderType) ([]*models.AppMetric, error) {
+				return appMetrics, nil
 			}
-			evaluator = NewEvaluator(logger, httpClient, scalingEngine.URL(), triggerChan, database, fakeBreachDurationSecs)
+			evaluator = NewEvaluator(logger, httpClient, scalingEngine.URL(), triggerChan, database, fakeBreachDurationSecs, getBreaker, setCoolDownExpired)
 			evaluator.Start()
 			Expect(triggerChan).To(BeSent(triggerArrayGT))
 		})
@@ -694,7 +781,7 @@ var _ = Describe("Evaluator", func() {
 		})
 
 		It("should log the error", func() {
-			Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("http reqeust error,failed to send trigger alarm")))
+			Eventually(logger.LogMessages).Should(ContainElement(ContainSubstring("failed-send-trigger-alarm-request")))
 		})
 	})
 })

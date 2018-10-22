@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"path"
 
@@ -15,16 +16,17 @@ import (
 const (
 	TokenTypeBearer = "Bearer"
 	PathApp         = "/v2/apps"
+	CFAppNotFound   = "CF-AppNotFound"
 )
 
-func (c *cfClient) GetAppInstances(appId string) (int, error) {
-	url := c.conf.Api + path.Join(PathApp, appId)
+func (c *cfClient) GetApp(appId string) (*models.AppEntity, error) {
+	url := c.conf.API + path.Join(PathApp, appId, "summary")
 	c.logger.Debug("get-app-instances", lager.Data{"url": url})
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		c.logger.Error("get-app-instances-new-request", err)
-		return -1, err
+		return nil, err
 	}
 	req.Header.Set("Authorization", TokenTypeBearer+" "+c.GetTokensWithRefresh().AccessToken)
 
@@ -33,35 +35,61 @@ func (c *cfClient) GetAppInstances(appId string) (int, error) {
 
 	if err != nil {
 		c.logger.Error("get-app-instances-do-request", err)
-		return -1, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == 404 {
+			respBody, err := ioutil.ReadAll(resp.Body)
+			if err != nil {
+				c.logger.Error("failed-to-read-response-body-while-getting-app-summary", err, lager.Data{"appid": appId})
+				return nil, err
+			}
+			var bodydata map[string]interface{}
+			err = json.Unmarshal([]byte(respBody), &bodydata)
+			if err != nil {
+				c.logger.Error("failed-to-unmarshal-response-body-while-getting-app-summary", err, lager.Data{"appid": appId})
+				return nil, err
+			}
+			errorDescription := bodydata["description"].(string)
+			errorCode := bodydata["error_code"].(string)
+			code := bodydata["code"].(float64)
+
+			if errorCode == CFAppNotFound && code == 100004 {
+				// Application does not exists
+				err = models.NewAppNotFoundErr(errorDescription)
+			} else {
+				err = fmt.Errorf("failed getting application summary: [%d] %s: %s", resp.StatusCode, errorCode, errorDescription)
+			}
+			c.logger.Error("get-app-summary-response", err, lager.Data{"appid": appId, "statusCode": resp.StatusCode, "description": errorDescription, "errorCode": errorCode})
+			return nil, err
+		}
+		// For Non 404 Error type
 		err = fmt.Errorf("failed getting application summary: %s [%d] %s", url, resp.StatusCode, resp.Status)
 		c.logger.Error("get-app-instances-response", err)
-		return -1, err
+		return nil, err
 	}
 
-	appInfo := &models.AppInfo{}
-	err = json.NewDecoder(resp.Body).Decode(appInfo)
+	appEntity := &models.AppEntity{}
+	err = json.NewDecoder(resp.Body).Decode(appEntity)
 	if err != nil {
 		c.logger.Error("get-app-instances-decode", err)
-		return -1, err
+		return nil, err
 	}
-	return appInfo.Entity.Instances, nil
+	return appEntity, nil
 }
 
-func (c *cfClient) SetAppInstances(appId string, num int) error {
-	url := c.conf.Api + path.Join(PathApp, appId)
+func (c *cfClient) SetAppInstances(appID string, num int) error {
+	url := c.conf.API + path.Join(PathApp, appID)
 	c.logger.Debug("set-app-instances", lager.Data{"url": url})
 
-	entity := models.AppEntity{
+	appEntity := models.AppEntity{
 		Instances: num,
 	}
-	body, err := json.Marshal(entity)
+	body, err := json.Marshal(appEntity)
 	if err != nil {
-		c.logger.Error("set-app-instances-marshal", err, lager.Data{"appid": appId, "entity": entity})
+		c.logger.Error("set-app-instances-marshal", err, lager.Data{"appid": appID, "appEntity": appEntity})
 		return err
 	}
 
@@ -83,10 +111,22 @@ func (c *cfClient) SetAppInstances(appId string, num int) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusCreated {
-		err = fmt.Errorf("failed setting application instances: %s [%d] %s", url, resp.StatusCode, resp.Status)
-		c.logger.Error("set-app-instances-response", err)
+		respBody, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			c.logger.Error("failed-to-read-response-body-while-setting-app-instance", err, lager.Data{"appid": appID})
+			return err
+		}
+		var bodydata map[string]interface{}
+		err = json.Unmarshal([]byte(respBody), &bodydata)
+		if err != nil {
+			c.logger.Error("failed-to-unmarshal-response-body-while-setting-app-instance", err, lager.Data{"appid": appID})
+			return err
+		}
+		errorDescription := bodydata["description"].(string)
+		errorCode := bodydata["error_code"].(string)
+		err = fmt.Errorf("failed setting application instances: [%d] %s: %s", resp.StatusCode, errorCode, errorDescription)
+		c.logger.Error("set-app-instances-response", err, lager.Data{"appid": appID, "statusCode": resp.StatusCode, "description": errorDescription, "errorCode": errorCode})
 		return err
 	}
-
 	return nil
 }

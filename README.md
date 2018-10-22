@@ -61,6 +61,7 @@ java -cp 'db/target/lib/*' liquibase.integration.commandline.Main --url jdbc:pos
 java -cp 'db/target/lib/*' liquibase.integration.commandline.Main --url jdbc:postgresql://127.0.0.1/autoscaler --driver=org.postgresql.Driver --changeLogFile=src/autoscaler/metricscollector/db/metricscollector.db.changelog.yml update
 java -cp 'db/target/lib/*' liquibase.integration.commandline.Main --url jdbc:postgresql://127.0.0.1/autoscaler --driver=org.postgresql.Driver --changeLogFile=src/autoscaler/eventgenerator/db/dataaggregator.db.changelog.yml update
 java -cp 'db/target/lib/*' liquibase.integration.commandline.Main --url jdbc:postgresql://127.0.0.1/autoscaler --driver=org.postgresql.Driver --changeLogFile=src/autoscaler/scalingengine/db/scalingengine.db.changelog.yml update
+java -cp 'db/target/lib/*' liquibase.integration.commandline.Main --url jdbc:postgresql://127.0.0.1/autoscaler --driver=org.postgresql.Driver --changeLogFile=src/autoscaler/operator/db/operator.db.changelog.yml update
 ```
 
 #### Generate TLS Certificates
@@ -120,13 +121,16 @@ popd
 
 go install github.com/onsi/ginkgo/ginkgo
 export DBURL=postgres://postgres@localhost/autoscaler?sslmode=disable
-ginkgo -r -race -p -randomizeAllSpecs src/integration
+ginkgo -r -race -randomizeAllSpecs src/integration
 ```
 
-## Deploy and use
+## Deploy and offer Auto-Scaler as a service
 
-Go to [app-autoscaler-release][r] project for how to BOSH deploy `App-AutoScaler` and use the service
+Go to [app-autoscaler-release][r] project for how to BOSH deploy `App-AutoScaler`
 
+## Use Auto-Scaler service
+
+Refer to [user guide][u] for the details of how to use the Auto-Scaler service, including policy definition, supported metrics, public API specification and commond line tool.
 
 ## License
 
@@ -143,3 +147,4 @@ This project is released under version 2.0 of the [Apache License][l].
 [t]: https://www.pivotaltracker.com/projects/1566795
 [p]: https://www.postgresql.org/
 [r]: https://github.com/cloudfoundry-incubator/app-autoscaler-release
+[u]: docs/Readme.md

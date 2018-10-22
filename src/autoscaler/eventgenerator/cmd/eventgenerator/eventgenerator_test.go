@@ -1,36 +1,26 @@
 package main_test
 
 import (
-	"autoscaler/eventgenerator"
 	"autoscaler/eventgenerator/config"
+	"autoscaler/helpers"
+	"fmt"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"time"
 
-	"code.cloudfoundry.org/clock"
-	"code.cloudfoundry.org/consuladapter"
-	"code.cloudfoundry.org/lager/lagertest"
-	"code.cloudfoundry.org/locket"
-
-	"github.com/hashicorp/consul/api"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"github.com/onsi/gomega/gbytes"
 	. "github.com/onsi/gomega/gbytes"
 	. "github.com/onsi/gomega/gexec"
-	"github.com/tedsuo/ifrit"
-	"github.com/tedsuo/ifrit/ginkgomon"
 )
 
 var _ = Describe("Eventgenerator", func() {
 	var (
-		runner       *EventGeneratorRunner
-		consulClient consuladapter.Client
+		runner *EventGeneratorRunner
 	)
 
 	BeforeEach(func() {
-		consulRunner.Reset()
-		consulClient = consulRunner.NewClient()
 		runner = NewEventGeneratorRunner()
 	})
 
@@ -38,103 +28,17 @@ var _ = Describe("Eventgenerator", func() {
 		runner.KillWithFire()
 	})
 
-	Context("when the eventgenerator acquires the lock", func() {
+	Context("with a valid config file", func() {
 		BeforeEach(func() {
-			runner.startCheck = ""
 			runner.Start()
-
-			Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say(runner.acquiredLockCheck))
 		})
 
-		It("registers itself with consul", func() {
-			Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say("eventgenerator.registration-runner.succeeded-registering-service"))
-
-			services, err := consulClient.Agent().Services()
-			Expect(err).ToNot(HaveOccurred())
-
-			Expect(services).To(HaveKeyWithValue("eventgenerator",
-				&api.AgentService{
-					Service: "eventgenerator",
-					ID:      "eventgenerator",
-				}))
-		})
-
-		It("registers a TTL healthcheck", func() {
-			Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say("eventgenerator.registration-runner.succeeded-registering-service"))
-
-			checks, err := consulClient.Agent().Checks()
-			Expect(err).ToNot(HaveOccurred())
-
-			Expect(checks).To(HaveKeyWithValue("service:eventgenerator",
-				&api.AgentCheck{
-					Node:        "0",
-					CheckID:     "service:eventgenerator",
-					Name:        "Service 'eventgenerator' check",
-					Status:      "passing",
-					ServiceID:   "eventgenerator",
-					ServiceName: "eventgenerator",
-				}))
-		})
-
-		It("should start", func() {
-			Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say("eventgenerator.started"))
+		It("Starts successfully, retrives metrics and  generates events", func() {
 			Consistently(runner.Session).ShouldNot(Exit())
 			Eventually(func() bool { return len(metricCollector.ReceivedRequests()) >= 1 }, 5*time.Second).Should(BeTrue())
-			Eventually(func() bool { return len(scalingEngine.ReceivedRequests()) >= 1 }, 5*time.Second).Should(BeTrue())
-		})
-	})
-
-	Context("when the eventgenerator loses the lock", func() {
-		BeforeEach(func() {
-			runner.startCheck = ""
-			runner.Start()
-
-			Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say(runner.acquiredLockCheck))
-			Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say("eventgenerator.started"))
-
-			consulRunner.Reset()
+			Eventually(func() bool { return len(scalingEngine.ReceivedRequests()) >= 1 }, time.Duration(2*breachDurationSecs)*time.Second).Should(BeTrue())
 		})
 
-		It("exits with failure", func() {
-			Eventually(runner.Session, 4*time.Second).Should(Exit(1))
-			Expect(runner.Session.Buffer()).Should(Say("exited-with-failure"))
-		})
-	})
-
-	Context("when the eventgenerator initially does not have the lock", func() {
-		var competingEventGeneratorProcess ifrit.Process
-
-		BeforeEach(func() {
-			logger := lagertest.NewTestLogger("competing-process")
-			buffer := logger.Buffer()
-
-			competingEventGeneratorLock := locket.NewLock(logger, consulClient, eventgenerator.EventGeneratorLockSchemaPath(), []byte{}, clock.NewClock(), conf.Lock.LockRetryInterval, conf.Lock.LockTTL)
-			competingEventGeneratorProcess = ifrit.Invoke(competingEventGeneratorLock)
-			Eventually(buffer, 2*time.Second).Should(gbytes.Say("competing-process.lock.acquire-lock-succeeded"))
-
-			runner.startCheck = ""
-			runner.Start()
-		})
-
-		It("should not start", func() {
-			Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say("eventgenerator.lock.acquiring-lock"))
-			Consistently(runner.Session.Buffer, 2*time.Second).ShouldNot(gbytes.Say("eventgenerator.started"))
-		})
-
-		Describe("when the lock becomes available", func() {
-			BeforeEach(func() {
-				ginkgomon.Kill(competingEventGeneratorProcess)
-			})
-
-			It("acquires the lock and starts", func() {
-				Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say(runner.acquiredLockCheck))
-				Eventually(runner.Session.Buffer, 2*time.Second).Should(gbytes.Say("eventgenerator.started"))
-				Consistently(runner.Session).ShouldNot(Exit())
-				Eventually(func() bool { return len(metricCollector.ReceivedRequests()) >= 1 }, 5*time.Second).Should(BeTrue())
-				Eventually(func() bool { return len(scalingEngine.ReceivedRequests()) >= 1 }, 5*time.Second).Should(BeTrue())
-			})
-
-		})
 	})
 
 	Context("with a missing config file", func() {
@@ -174,7 +78,7 @@ var _ = Describe("Eventgenerator", func() {
 		BeforeEach(func() {
 			runner.startCheck = ""
 			conf := &config.Config{
-				Logging: config.LoggingConfig{
+				Logging: helpers.LoggingConfig{
 					Level: "debug",
 				},
 				Aggregator: config.AggregatorConfig{
@@ -204,34 +108,6 @@ var _ = Describe("Eventgenerator", func() {
 		})
 	})
 
-	Context("when no consul is configured", func() {
-		BeforeEach(func() {
-			noConsulConf := conf
-			noConsulConf.Lock.ConsulClusterConfig = ""
-			runner.configPath = writeConfig(noConsulConf).Name()
-			runner.startCheck = ""
-			runner.Start()
-		})
-
-		AfterEach(func() {
-			os.Remove(runner.configPath)
-		})
-
-		It("should not get eventgenerator service", func() {
-			Eventually(func() map[string]*api.AgentService {
-				services, err := consulClient.Agent().Services()
-				Expect(err).ToNot(HaveOccurred())
-				return services
-			}).ShouldNot(HaveKey("eventgenerator"))
-		})
-
-		It("should start eventgenerator", func() {
-			Eventually(runner.Session.Buffer, 2*time.Second).Should(Say("eventgenerator.started"))
-			Consistently(runner.Session).ShouldNot(Exit())
-		})
-
-	})
-
 	Context("when an interrupt is sent", func() {
 		BeforeEach(func() {
 			runner.Start()
@@ -242,4 +118,22 @@ var _ = Describe("Eventgenerator", func() {
 			Eventually(runner.Session, 5).Should(Exit(0))
 		})
 	})
+
+	Describe("EventGenerator REST API", func() {
+		Context("when a request for aggregated metrics history comes", func() {
+			BeforeEach(func() {
+				runner.Start()
+			})
+
+			It("returns with a 200", func() {
+				rsp, err := httpClient.Get(fmt.Sprintf("https://127.0.0.1:%d/v1/apps/an-app-id/aggregated_metric_histories/a-metric-type", egPort))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rsp.StatusCode).To(Equal(http.StatusOK))
+				rsp.Body.Close()
+			})
+
+		})
+
+	})
+
 })

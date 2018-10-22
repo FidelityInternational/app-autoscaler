@@ -1,4 +1,4 @@
-package integration_test
+package integration
 
 import (
 	"autoscaler/cf"
@@ -6,7 +6,6 @@ import (
 	"autoscaler/metricscollector/testhelpers"
 	"autoscaler/models"
 	"bytes"
-	. "integration"
 
 	"database/sql"
 	"encoding/json"
@@ -56,12 +55,15 @@ var (
 	metricsCollectorConfPath string
 	eventGeneratorConfPath   string
 	scalingEngineConfPath    string
+	operatorConfPath         string
 	brokerUserName           string = "username"
 	brokerPassword           string = "password"
 	brokerAuth               string
 	dbUrl                    string
+	LOGLEVEL                 string
 	noaaPollingRegPath       = regexp.MustCompile(`^/apps/.*/containermetrics$`)
 	noaaStreamingRegPath     = regexp.MustCompile(`^/apps/.*/stream$`)
+	appSummaryRegPath        = regexp.MustCompile(`^/v2/apps/.*/summary$`)
 	appInstanceRegPath       = regexp.MustCompile(`^/v2/apps/.*$`)
 	checkUserSpaceRegPath    = regexp.MustCompile(`^/v2/users/.+/spaces.*$`)
 	dbHelper                 *sql.DB
@@ -72,20 +74,22 @@ var (
 	emptyMessageChannel      chan []byte
 	testUserId               string = "testUserId"
 
-	processMap       map[string]ifrit.Process = map[string]ifrit.Process{}
-	schedulerProcess ifrit.Process
+	processMap map[string]ifrit.Process = map[string]ifrit.Process{}
 
-	brokerApiHttpRequestTimeout              time.Duration = 5 * time.Second
-	apiSchedulerHttpRequestTimeout           time.Duration = 5 * time.Second
+	brokerApiHttpRequestTimeout              time.Duration = 10 * time.Second
+	apiSchedulerHttpRequestTimeout           time.Duration = 10 * time.Second
 	apiScalingEngineHttpRequestTimeout       time.Duration = 10 * time.Second
 	apiMetricsCollectorHttpRequestTimeout    time.Duration = 10 * time.Second
+	apiEventGeneratorHttpRequestTimeout      time.Duration = 10 * time.Second
 	schedulerScalingEngineHttpRequestTimeout time.Duration = 10 * time.Second
 
 	collectInterval           time.Duration = 1 * time.Second
 	refreshInterval           time.Duration = 1 * time.Second
+	saveInterval              time.Duration = 1 * time.Second
 	aggregatorExecuteInterval time.Duration = 1 * time.Second
 	policyPollerInterval      time.Duration = 1 * time.Second
 	evaluationManagerInterval time.Duration = 1 * time.Second
+	breachDurationSecs        int           = 5
 
 	httpClient             *http.Client
 	httpClientForPublicApi *http.Client
@@ -131,6 +135,11 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	dbUrl = os.Getenv("DBURL")
 	dbHelper, err = sql.Open(db.PostgresDriverName, dbUrl)
 	Expect(err).NotTo(HaveOccurred())
+
+	LOGLEVEL = os.Getenv("LOGLEVEL")
+	if LOGLEVEL == "" {
+		LOGLEVEL = "info"
+	}
 
 	consulRunner = consulrunner.NewClusterRunner(
 		consulrunner.ClusterRunnerConfig{
@@ -179,18 +188,23 @@ func CompileTestedExecutables() Executables {
 	builtExecutables[ScalingEngine], err = gexec.BuildIn(rootDir, "autoscaler/scalingengine/cmd/scalingengine", "-race")
 	Expect(err).NotTo(HaveOccurred())
 
+	builtExecutables[Operator], err = gexec.BuildIn(rootDir, "autoscaler/operator/cmd/operator", "-race")
+	Expect(err).NotTo(HaveOccurred())
+
 	return builtExecutables
 }
 
 func PreparePorts() Ports {
 	return Ports{
-		APIServer:        10000 + GinkgoParallelNode(),
-		APIPublicServer:  16000 + GinkgoParallelNode(),
-		ServiceBroker:    11000 + GinkgoParallelNode(),
-		Scheduler:        12000 + GinkgoParallelNode(),
-		MetricsCollector: 13000 + GinkgoParallelNode(),
-		ScalingEngine:    14000 + GinkgoParallelNode(),
-		ConsulCluster:    15000 + GinkgoParallelNode()*consulrunner.PortOffsetLength,
+		APIServer:             10000 + GinkgoParallelNode(),
+		APIPublicServer:       12000 + GinkgoParallelNode(),
+		ServiceBroker:         13000 + GinkgoParallelNode(),
+		ServiceBrokerInternal: 14000 + GinkgoParallelNode(),
+		Scheduler:             15000 + GinkgoParallelNode(),
+		MetricsCollector:      16000 + GinkgoParallelNode(),
+		EventGenerator:        17000 + GinkgoParallelNode(),
+		ScalingEngine:         18000 + GinkgoParallelNode(),
+		ConsulCluster:         19000 + GinkgoParallelNode()*consulrunner.PortOffsetLength,
 	}
 }
 
@@ -210,9 +224,10 @@ func startServiceBroker() *ginkgomon.Runner {
 	return runner
 }
 
-func startScheduler() ifrit.Process {
-	runner := components.Scheduler(schedulerConfPath)
-	return ginkgomon.Invoke(runner)
+func startScheduler() {
+	processMap[Scheduler] = ginkgomon.Invoke(grouper.NewOrdered(os.Interrupt, grouper.Members{
+		{Scheduler, components.Scheduler(schedulerConfPath)},
+	}))
 }
 
 func startMetricsCollector() {
@@ -228,26 +243,39 @@ func startEventGenerator() {
 }
 
 func startScalingEngine() {
-	runner := components.ScalingEngine(scalingEngineConfPath)
 	processMap[ScalingEngine] = ginkgomon.Invoke(grouper.NewOrdered(os.Interrupt, grouper.Members{
-		{ScalingEngine, runner},
+		{ScalingEngine, components.ScalingEngine(scalingEngineConfPath)},
+	}))
+}
+
+func startOperator() {
+	processMap[Operator] = ginkgomon.Invoke(grouper.NewOrdered(os.Interrupt, grouper.Members{
+		{Operator, components.Operator(operatorConfPath)},
 	}))
 }
 
 func stopApiServer() {
-	ginkgomon.Interrupt(processMap[APIServer], 5*time.Second)
+	ginkgomon.Kill(processMap[APIServer], 5*time.Second)
 }
-
-func stopScheduler(schedulerProcess ifrit.Process) {
-	ginkgomon.Kill(schedulerProcess)
+func stopScheduler() {
+	ginkgomon.Kill(processMap[Scheduler], 5*time.Second)
 }
-
 func stopScalingEngine() {
 	ginkgomon.Kill(processMap[ScalingEngine], 5*time.Second)
 }
 func stopMetricsCollector() {
 	ginkgomon.Kill(processMap[MetricsCollector], 5*time.Second)
 }
+func stopEventGenerator() {
+	ginkgomon.Kill(processMap[EventGenerator], 5*time.Second)
+}
+func stopServiceBroker() {
+	ginkgomon.Kill(processMap[ServiceBroker], 5*time.Second)
+}
+func stopOperator() {
+	ginkgomon.Kill(processMap[Operator], 5*time.Second)
+}
+
 func sendSigusr2Signal(component string) {
 	process := processMap[component]
 	if process != nil {
@@ -310,11 +338,19 @@ func deprovisionServiceInstance(serviceInstanceId string) (*http.Response, error
 }
 
 func bindService(bindingId string, appId string, serviceInstanceId string, policy []byte) (*http.Response, error) {
-	rawParameters := json.RawMessage(policy)
-	bindBody := map[string]interface{}{
-		"app_guid":   appId,
-		"parameters": &rawParameters,
+	var bindBody map[string]interface{}
+	if policy != nil {
+		rawParameters := json.RawMessage(policy)
+		bindBody = map[string]interface{}{
+			"app_guid":   appId,
+			"parameters": &rawParameters,
+		}
+	} else {
+		bindBody = map[string]interface{}{
+			"app_guid": appId,
+		}
 	}
+
 	body, err := json.Marshal(bindBody)
 	req, err := http.NewRequest("PUT", fmt.Sprintf("https://127.0.0.1:%d/v2/service_instances/%s/service_bindings/%s", components.Ports[ServiceBroker], serviceInstanceId, bindingId), bytes.NewReader(body))
 	Expect(err).NotTo(HaveOccurred())
@@ -331,6 +367,29 @@ func unbindService(bindingId string, appId string, serviceInstanceId string) (*h
 	return httpClient.Do(req)
 }
 
+func provisionAndBind(serviceInstanceId string, orgId string, spaceId string, bindingId string, appId string, policy []byte) {
+	resp, err := provisionServiceInstance(serviceInstanceId, orgId, spaceId)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(resp.StatusCode).To(Equal(http.StatusCreated))
+	resp.Body.Close()
+
+	resp, err = bindService(bindingId, appId, serviceInstanceId, policy)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(resp.StatusCode).To(Equal(http.StatusCreated))
+	resp.Body.Close()
+}
+func unbindAndDeprovision(bindingId string, appId string, serviceInstanceId string) {
+	resp, err := unbindService(bindingId, appId, serviceInstanceId)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(resp.StatusCode).To(Equal(http.StatusOK))
+	resp.Body.Close()
+
+	resp, err = deprovisionServiceInstance(serviceInstanceId)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(resp.StatusCode).To(Equal(http.StatusOK))
+	resp.Body.Close()
+
+}
 func getPolicy(appId string, apiType APIType) (*http.Response, error) {
 	var apiServerPort int
 	var httpClientTmp *http.Client
@@ -378,6 +437,7 @@ func attachPolicy(appId string, policy []byte, apiType APIType) (*http.Response,
 		apiServerPort = components.Ports[APIPublicServer]
 		httpClientTmp = httpClientForPublicApi
 	}
+
 	req, err := http.NewRequest("PUT", fmt.Sprintf("https://127.0.0.1:%d/v1/apps/%s/policy", apiServerPort, appId), bytes.NewReader(policy))
 	Expect(err).NotTo(HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
@@ -387,15 +447,15 @@ func attachPolicy(appId string, policy []byte, apiType APIType) (*http.Response,
 	return httpClientTmp.Do(req)
 }
 
-func getSchedules(appId string, apiType APIType) (*http.Response, error) {
-	req, err := http.NewRequest("GET", fmt.Sprintf("https://127.0.0.1:%d/v2/schedules/%s", components.Ports["scheduler"], appId), strings.NewReader(""))
+func getSchedules(appId string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", fmt.Sprintf("https://127.0.0.1:%d/v1/apps/%s/schedules", components.Ports[Scheduler], appId), strings.NewReader(""))
 	Expect(err).NotTo(HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
 	return httpClient.Do(req)
 }
 
 func createSchedule(appId string, guid string, schedule string) (*http.Response, error) {
-	req, err := http.NewRequest("PUT", fmt.Sprintf("https://127.0.0.1:%d/v2/schedules/%s?guid=%s", components.Ports[Scheduler], appId, guid), bytes.NewReader([]byte(schedule)))
+	req, err := http.NewRequest("PUT", fmt.Sprintf("https://127.0.0.1:%d/v1/apps/%s/schedules?guid=%s", components.Ports[Scheduler], appId, guid), bytes.NewReader([]byte(schedule)))
 	if err != nil {
 		panic(err)
 	}
@@ -405,14 +465,7 @@ func createSchedule(appId string, guid string, schedule string) (*http.Response,
 }
 
 func deleteSchedule(appId string) (*http.Response, error) {
-	req, err := http.NewRequest("DELETE", fmt.Sprintf("https://127.0.0.1:%d/v2/schedules/%s", components.Ports[Scheduler], appId), strings.NewReader(""))
-	Expect(err).NotTo(HaveOccurred())
-	req.Header.Set("Content-Type", "application/json")
-	return httpClient.Do(req)
-}
-
-func synchronizeSchedule() (*http.Response, error) {
-	req, err := http.NewRequest("PUT", fmt.Sprintf("https://127.0.0.1:%d/v2/syncSchedules", components.Ports[Scheduler]), strings.NewReader(""))
+	req, err := http.NewRequest("DELETE", fmt.Sprintf("https://127.0.0.1:%d/v1/apps/%s/schedules", components.Ports[Scheduler], appId), strings.NewReader(""))
 	Expect(err).NotTo(HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
 	return httpClient.Do(req)
@@ -424,16 +477,30 @@ func getActiveSchedule(appId string) (*http.Response, error) {
 	req.Header.Set("Content-Type", "application/json")
 	return httpClient.Do(req)
 }
-func getScalingHistories(pathVariables []string, parameters map[string]string, apiType APIType) (*http.Response, error) {
+
+func activeScheduleExists(appId string) bool {
+	resp, err := getActiveSchedule(appId)
+	Expect(err).NotTo(HaveOccurred())
+
+	return resp.StatusCode == http.StatusOK
+}
+
+func setPolicySpecificDateTime(policyByte []byte, start time.Duration, end time.Duration) string {
+	timeZone := "GMT"
+	location, _ := time.LoadLocation(timeZone)
+	timeNowInTimeZone := time.Now().In(location)
+	dateTimeFormat := "2006-01-02T15:04"
+	startTime := timeNowInTimeZone.Add(start).Format(dateTimeFormat)
+	endTime := timeNowInTimeZone.Add(end).Format(dateTimeFormat)
+
+	return fmt.Sprintf(string(policyByte), timeZone, startTime, endTime)
+}
+func getScalingHistories(pathVariables []string, parameters map[string]string) (*http.Response, error) {
 	var apiServerPort int
 	var httpClientTmp *http.Client
-	if apiType == INTERNAL {
-		apiServerPort = components.Ports[APIServer]
-		httpClientTmp = httpClient
-	} else {
-		apiServerPort = components.Ports[APIPublicServer]
-		httpClientTmp = httpClientForPublicApi
-	}
+	apiServerPort = components.Ports[APIPublicServer]
+	httpClientTmp = httpClientForPublicApi
+
 	url := "https://127.0.0.1:%d/v1/apps/%s/scaling_histories"
 	if parameters != nil && len(parameters) > 0 {
 		url += "?any=any"
@@ -444,21 +511,14 @@ func getScalingHistories(pathVariables []string, parameters map[string]string, a
 	req, err := http.NewRequest("GET", fmt.Sprintf(url, apiServerPort, pathVariables[0]), strings.NewReader(""))
 	Expect(err).NotTo(HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
-	if apiType == PUBLIC {
-		req.Header.Set("Authorization", "bearer fake-token")
-	}
+	req.Header.Set("Authorization", "bearer fake-token")
 	return httpClientTmp.Do(req)
 }
-func getAppMetrics(pathVariables []string, parameters map[string]string, apiType APIType) (*http.Response, error) {
+func getAppInstanceMetrics(pathVariables []string, parameters map[string]string) (*http.Response, error) {
 	var apiServerPort int
 	var httpClientTmp *http.Client
-	if apiType == INTERNAL {
-		apiServerPort = components.Ports[APIServer]
-		httpClientTmp = httpClient
-	} else {
-		apiServerPort = components.Ports[APIPublicServer]
-		httpClientTmp = httpClientForPublicApi
-	}
+	apiServerPort = components.Ports[APIPublicServer]
+	httpClientTmp = httpClientForPublicApi
 	url := "https://127.0.0.1:%d/v1/apps/%s/metric_histories/%s"
 	if parameters != nil && len(parameters) > 0 {
 		url += "?any=any"
@@ -469,11 +529,29 @@ func getAppMetrics(pathVariables []string, parameters map[string]string, apiType
 	req, err := http.NewRequest("GET", fmt.Sprintf(url, apiServerPort, pathVariables[0], pathVariables[1]), strings.NewReader(""))
 	Expect(err).NotTo(HaveOccurred())
 	req.Header.Set("Content-Type", "application/json")
-	if apiType == PUBLIC {
-		req.Header.Set("Authorization", "bearer fake-token")
-	}
+	req.Header.Set("Authorization", "bearer fake-token")
 	return httpClientTmp.Do(req)
 }
+
+func getAppAggregatedMetrics(pathVariables []string, parameters map[string]string) (*http.Response, error) {
+	var apiServerPort int
+	var httpClientTmp *http.Client
+	apiServerPort = components.Ports[APIPublicServer]
+	httpClientTmp = httpClientForPublicApi
+	url := "https://127.0.0.1:%d/v1/apps/%s/aggregated_metric_histories/%s"
+	if parameters != nil && len(parameters) > 0 {
+		url += "?any=any"
+		for paramName, paramValue := range parameters {
+			url += "&" + paramName + "=" + paramValue
+		}
+	}
+	req, err := http.NewRequest("GET", fmt.Sprintf(url, apiServerPort, pathVariables[0], pathVariables[1]), strings.NewReader(""))
+	Expect(err).NotTo(HaveOccurred())
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "bearer fake-token")
+	return httpClientTmp.Do(req)
+}
+
 func readPolicyFromFile(filename string) []byte {
 	content, err := ioutil.ReadFile(filename)
 	Expect(err).NotTo(HaveOccurred())
@@ -524,6 +602,7 @@ func deletePolicy(appId string) {
 	_, err := dbHelper.Exec(query, appId)
 	Expect(err).NotTo(HaveOccurred())
 }
+
 func insertScalingHistory(history *models.AppScalingHistory) {
 	query := "INSERT INTO scalinghistory" +
 		"(appid, timestamp, scalingtype, status, oldinstances, newinstances, reason, message, error) " +
@@ -540,6 +619,13 @@ func getScalingHistoryCount(appId string, oldInstanceCount int, newInstanceCount
 	Expect(err).NotTo(HaveOccurred())
 	return count
 }
+func getScalingHistoryTotalCount(appId string) int {
+	var count int
+	query := "SELECT COUNT(*) FROM scalinghistory WHERE appid=$1"
+	err := dbHelper.QueryRow(query, appId).Scan(&count)
+	Expect(err).NotTo(HaveOccurred())
+	return count
+}
 func insertAppInstanceMetric(appInstanceMetric *models.AppInstanceMetric) {
 	query := "INSERT INTO appinstancemetrics" +
 		"(appid, instanceindex, collectedat, name, unit, value, timestamp) " +
@@ -547,17 +633,48 @@ func insertAppInstanceMetric(appInstanceMetric *models.AppInstanceMetric) {
 	_, err := dbHelper.Exec(query, appInstanceMetric.AppId, appInstanceMetric.InstanceIndex, appInstanceMetric.CollectedAt, appInstanceMetric.Name, appInstanceMetric.Unit, appInstanceMetric.Value, appInstanceMetric.Timestamp)
 	Expect(err).NotTo(HaveOccurred())
 }
+func insertAppMetric(appMetrics *models.AppMetric) {
+	query := "INSERT INTO app_metric" +
+		"(app_id, metric_type, unit, value, timestamp) " +
+		"VALUES($1, $2, $3, $4, $5)"
+	_, err := dbHelper.Exec(query, appMetrics.AppId, appMetrics.MetricType, appMetrics.Unit, appMetrics.Value, appMetrics.Timestamp)
+	Expect(err).NotTo(HaveOccurred())
+}
+
+func getAppInstanceMetricTotalCount(appId string) int {
+	var count int
+	query := "SELECT COUNT(*) FROM appinstancemetrics WHERE appid=$1"
+	err := dbHelper.QueryRow(query, appId).Scan(&count)
+	Expect(err).NotTo(HaveOccurred())
+	return count
+}
+
+func getAppMetricTotalCount(appId string) int {
+	var count int
+	query := "SELECT COUNT(*) FROM app_metric WHERE app_id=$1"
+	err := dbHelper.QueryRow(query, appId).Scan(&count)
+	Expect(err).NotTo(HaveOccurred())
+	return count
+}
+
+func getCredentialsCount(appId string) int {
+	var count int
+	query := "SELECT COUNT(*) FROM credentials WHERE id=$1"
+	err := dbHelper.QueryRow(query, appId).Scan(&count)
+	Expect(err).NotTo(HaveOccurred())
+	return count
+}
 
 type GetResponse func(id string, apiType APIType) (*http.Response, error)
-type GetResponseWithParameters func(pathVariables []string, parameters map[string]string, apiType APIType) (*http.Response, error)
+type GetResponseWithParameters func(pathVariables []string, parameters map[string]string) (*http.Response, error)
 
 func checkResponseContent(getResponse GetResponse, id string, expectHttpStatus int, expectResponseMap map[string]interface{}, apiType APIType) {
 	resp, err := getResponse(id, apiType)
 	checkResponse(resp, err, expectHttpStatus, expectResponseMap)
 
 }
-func checkResponseContentWithParameters(getResponseWithParameters GetResponseWithParameters, pathVariables []string, parameters map[string]string, expectHttpStatus int, expectResponseMap map[string]interface{}, apiType APIType) {
-	resp, err := getResponseWithParameters(pathVariables, parameters, apiType)
+func checkPublicAPIResponseContentWithParameters(getResponseWithParameters GetResponseWithParameters, pathVariables []string, parameters map[string]string, expectHttpStatus int, expectResponseMap map[string]interface{}) {
+	resp, err := getResponseWithParameters(pathVariables, parameters)
 	checkResponse(resp, err, expectHttpStatus, expectResponseMap)
 }
 func checkResponse(resp *http.Response, err error, expectHttpStatus int, expectResponseMap map[string]interface{}) {
@@ -569,19 +686,28 @@ func checkResponse(resp *http.Response, err error, expectHttpStatus int, expectR
 	Expect(actual).To(Equal(expectResponseMap))
 	resp.Body.Close()
 }
-func checkSchedule(getResponse GetResponse, id string, expectHttpStatus int, expectResponseMap map[string]int, apiType APIType) {
-	resp, err := getResponse(id, apiType)
+
+func checkResponseEmptyAndStatusCode(resp *http.Response, err error, expectedStatus int) {
+	Expect(err).NotTo(HaveOccurred())
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	Expect(err).NotTo(HaveOccurred())
+	Expect(body).To(HaveLen(0))
+	Expect(resp.StatusCode).To(Equal(expectedStatus))
+}
+
+func checkSchedule(appId string, expectHttpStatus int, expectResponseMap map[string]int) bool {
+	resp, err := getSchedules(appId)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(resp.StatusCode).To(Equal(expectHttpStatus))
+	defer resp.Body.Close()
 	var actual map[string]interface{}
 	err = json.NewDecoder(resp.Body).Decode(&actual)
 	Expect(err).NotTo(HaveOccurred())
 	var schedules map[string]interface{} = actual["schedules"].(map[string]interface{})
 	var recurring []interface{} = schedules["recurring_schedule"].([]interface{})
 	var specificDate []interface{} = schedules["specific_date"].([]interface{})
-	Expect(len(specificDate)).To(Equal(expectResponseMap["specific_date"]))
-	Expect(len(recurring)).To(Equal(expectResponseMap["recurring_schedule"]))
-	resp.Body.Close()
+	return len(specificDate) == expectResponseMap["specific_date"] && len(recurring) == expectResponseMap["recurring_schedule"]
 }
 
 func startFakeCCNOAAUAA(instanceCount int) {
@@ -589,12 +715,13 @@ func startFakeCCNOAAUAA(instanceCount int) {
 	fakeCCNOAAUAA.RouteToHandler("GET", "/v2/info", ghttp.RespondWithJSONEncoded(http.StatusOK,
 		cf.Endpoints{
 			AuthEndpoint:    fakeCCNOAAUAA.URL(),
+			TokenEndpoint:   fakeCCNOAAUAA.URL(),
 			DopplerEndpoint: strings.Replace(fakeCCNOAAUAA.URL(), "http", "ws", 1),
 		}))
 	fakeCCNOAAUAA.RouteToHandler("POST", "/oauth/token", ghttp.RespondWithJSONEncoded(http.StatusOK, cf.Tokens{}))
-
-	fakeCCNOAAUAA.RouteToHandler("GET", appInstanceRegPath, ghttp.RespondWithJSONEncoded(http.StatusOK,
-		models.AppInfo{Entity: models.AppEntity{Instances: instanceCount}}))
+	appState := models.AppStatusStarted
+	fakeCCNOAAUAA.RouteToHandler("GET", appSummaryRegPath, ghttp.RespondWithJSONEncoded(http.StatusOK,
+		models.AppEntity{Instances: instanceCount, State: &appState}))
 	fakeCCNOAAUAA.RouteToHandler("PUT", appInstanceRegPath, ghttp.RespondWith(http.StatusCreated, ""))
 	fakeCCNOAAUAA.RouteToHandler("GET", "/userinfo", ghttp.RespondWithJSONEncoded(http.StatusOK,
 		struct {
@@ -645,12 +772,16 @@ func fakeMetricsStreaming(appId string, memoryValue uint64, memQuota uint64) {
 			return
 		case <-ticker.C:
 			timestamp := time.Now().UnixNano()
-			message1 := marshalMessage(createContainerMetric(appId, 0, 3.0, memoryValue, 2048000000, memQuota, 4096000000, timestamp))
+			message1 := marshalMessage(createContainerMetric(appId, 0, 3.0, memoryValue, 2048000000, memQuota, 4096000000, timestamp-int64(time.Duration(breachDurationSecs)*time.Second)))
 			messagesToSend <- message1
 			message2 := marshalMessage(createContainerMetric(appId, 1, 4.0, memoryValue, 2048000000, memQuota, 4096000000, timestamp))
 			messagesToSend <- message2
 			message3 := marshalMessage(createContainerMetric(appId, 2, 5.0, memoryValue, 2048000000, memQuota, 4096000000, timestamp))
 			messagesToSend <- message3
+			message4 := marshalMessage(createContainerMetric(appId, 2, 5.0, memoryValue, 2048000000, memQuota, 4096000000, timestamp))
+			messagesToSend <- message4
+			message5 := marshalMessage(createContainerMetric(appId, 2, 5.0, memoryValue, 2048000000, memQuota, 4096000000, timestamp+int64(time.Duration(breachDurationSecs)*time.Second)))
+			messagesToSend <- message5
 		}
 	}()
 

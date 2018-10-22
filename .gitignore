@@ -9,3 +9,4 @@
 *.coverprofile
 npm-shrinkwrap.json
 src/autoscaler/metricscollector/metricscollector
+**/.idea

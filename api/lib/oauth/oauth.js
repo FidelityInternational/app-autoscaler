@@ -1,11 +1,9 @@
 'use strict';
-module.exports = function(configFilePath) {
+module.exports = function(settings) {
   var request = require("request");
   var logger = require('../log/logger');
   var path = require('path');
   var fs = require('fs');
-  var settings = require(path.join(__dirname, './../config/setting.js'))((JSON.parse(
-    fs.readFileSync(configFilePath, 'utf8'))));
   var HttpStatus = require('http-status-codes');
   var obj = {};
   obj.checkUserAuthorization = function(req, callback) {
@@ -31,7 +29,7 @@ module.exports = function(configFilePath) {
           method: "GET",
           json: true,
           timeout: 10000,
-          rejectUnauthorized: false,   
+          rejectUnauthorized: !settings.skipSSLValidation,
           headers: {
             "Authorization": userToken,
             "Content-Type": "application/json"
@@ -80,7 +78,7 @@ module.exports = function(configFilePath) {
       method: "GET",
       json: true,
       timeout: 10000,
-      rejectUnauthorized: false,
+      rejectUnauthorized: !settings.skipSSLValidation,
     };
     request(options, function(error, response, body) {
       if (error) {
@@ -104,11 +102,11 @@ module.exports = function(configFilePath) {
   function requestUserInfoFromUAA(req, callback) {
     var userToken = req.header("Authorization");
     var options = {
-      url: obj.authorizationEndpoint + "/userinfo",
+      url: obj.tokenEndpoint + "/userinfo",
       method: "GET",
       json: true,
       timeout: 10000,
-      rejectUnauthorized: false, 
+      rejectUnauthorized: !settings.skipSSLValidation,
       headers: {
         "Authorization": userToken,
         "Content-Type": "application/json"
@@ -134,14 +132,14 @@ module.exports = function(configFilePath) {
   }
 
   function getUserInfo(req, callback) {
-    if (obj.authorizationEndpoint) {
+    if (obj.tokenEndpoint) {
       requestUserInfoFromUAA(req, callback);
     } else {
       getCloudFoundryInfo(function(error, responseBody) {
         if (error) {
           callback(error, null);
         } else {
-          obj.authorizationEndpoint = responseBody.body.authorization_endpoint;
+          obj.tokenEndpoint = responseBody.body.token_endpoint;
           requestUserInfoFromUAA(req, callback);
         }
       });

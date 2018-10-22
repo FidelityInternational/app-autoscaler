@@ -24,11 +24,10 @@ func (vh VarsFunc) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	vh(w, r, vars)
 }
 
-func NewServer(logger lager.Logger, conf *config.Config, cfc cf.CfClient, consumer noaa.NoaaConsumer, database db.InstanceMetricsDB) (ifrit.Runner, error) {
+func NewServer(logger lager.Logger, conf *config.Config, cfc cf.CFClient, consumer noaa.NoaaConsumer, database db.InstanceMetricsDB) (ifrit.Runner, error) {
 	mh := NewMetricHandler(logger, cfc, consumer, database)
 
 	r := routes.MetricsCollectorRoutes()
-	r.Get(routes.GetMemoryMetricRouteName).Handler(VarsFunc(mh.GetMemoryMetric))
 	r.Get(routes.GetMetricHistoriesRouteName).Handler(VarsFunc(mh.GetMetricHistories))
 
 	addr := fmt.Sprintf("0.0.0.0:%d", conf.Server.Port)

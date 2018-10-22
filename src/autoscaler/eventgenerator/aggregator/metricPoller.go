@@ -19,17 +19,17 @@ type MetricPoller struct {
 	doneChan           chan bool
 	appChan            chan *models.AppMonitor
 	httpClient         *http.Client
-	appMetricDB        db.AppMetricDB
+	appMetricChan      chan *models.AppMetric
 }
 
-func NewMetricPoller(logger lager.Logger, metricCollectorUrl string, appChan chan *models.AppMonitor, httpClient *http.Client, appMetricDB db.AppMetricDB) *MetricPoller {
+func NewMetricPoller(logger lager.Logger, metricCollectorUrl string, appChan chan *models.AppMonitor, httpClient *http.Client, appMetricChan chan *models.AppMetric) *MetricPoller {
 	return &MetricPoller{
 		metricCollectorUrl: metricCollectorUrl,
 		logger:             logger.Session("MetricPoller"),
 		appChan:            appChan,
 		doneChan:           make(chan bool),
 		httpClient:         httpClient,
-		appMetricDB:        appMetricDB,
+		appMetricChan:      appMetricChan,
 	}
 }
 
@@ -40,13 +40,13 @@ func (m *MetricPoller) Start() {
 
 func (m *MetricPoller) Stop() {
 	close(m.doneChan)
-	m.logger.Info("stopped")
 }
 
 func (m *MetricPoller) startMetricRetrieve() {
 	for {
 		select {
 		case <-m.doneChan:
+			m.logger.Info("stopped")
 			return
 		case app := <-m.appChan:
 			m.retrieveMetric(app)
@@ -91,18 +91,16 @@ func (m *MetricPoller) retrieveMetric(app *models.AppMonitor) {
 	if avgMetric == nil {
 		return
 	}
+	m.logger.Debug("Save aggregated appmetric", lager.Data{"appId": appId, "appMetric": avgMetric})
+	m.appMetricChan <- avgMetric
 
-	err = m.appMetricDB.SaveAppMetric(avgMetric)
-	if err != nil {
-		m.logger.Error("Failed to save appmetric", err, lager.Data{"appmetric": avgMetric})
-	}
 }
 
 func (m *MetricPoller) aggregate(appId string, metricType string, metrics []*models.AppInstanceMetric) *models.AppMetric {
-	var count int64 = 0
-	var sum int64 = 0
+	var count int64
+	var sum int64
 	var unit string
-	var timestamp int64 = time.Now().UnixNano()
+	timestamp := time.Now().UnixNano()
 	for _, metric := range metrics {
 		unit = metric.Unit
 		metricValue, err := strconv.ParseInt(metric.Value, 10, 64)

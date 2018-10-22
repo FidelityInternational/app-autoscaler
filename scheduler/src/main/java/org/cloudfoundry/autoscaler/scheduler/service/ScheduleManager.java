@@ -170,30 +170,29 @@ public class ScheduleManager {
 			validationErrorResult.addFieldError(applicationPolicy, "data.value.not.specified", "app_id");
 		}
 
-		boolean isValidTimeZone = validateTimeZone(applicationPolicy);
-
 		// Validate the default minimum and maximum instance count
 		validateDefaultInstanceMinMaxCount(applicationPolicy.getInstanceMinCount(),
 				applicationPolicy.getInstanceMaxCount());
 
 		// Validate schedules.
-		if (applicationPolicy.getSchedules().hasSchedules()) {
-			List<SpecificDateScheduleEntity> specificDateSchedules = applicationPolicy.getSchedules().getSpecificDate();
-			// Validate specific date schedules.
-			if (specificDateSchedules != null) {
-				validateSpecificDateSchedules(specificDateSchedules, isValidTimeZone);
+		Schedules schedules = applicationPolicy.getSchedules();
+		if (schedules != null ) {
+			boolean isValidTimeZone = validateTimeZone(applicationPolicy);
+
+			if (schedules.hasSchedules()) {
+				List<SpecificDateScheduleEntity> specificDateSchedules = applicationPolicy.getSchedules().getSpecificDate();
+				// Validate specific date schedules.
+				if (specificDateSchedules != null) {
+					validateSpecificDateSchedules(specificDateSchedules, isValidTimeZone);
+				}
+
+				List<RecurringScheduleEntity> recurringSchedules = applicationPolicy.getSchedules().getRecurringSchedule();
+				// Validate recurring schedules.
+				if (recurringSchedules != null) {
+					validateRecurringSchedules(recurringSchedules, isValidTimeZone);
+				}
 			}
-
-			List<RecurringScheduleEntity> recurringSchedules = applicationPolicy.getSchedules().getRecurringSchedule();
-			// Validate recurring schedules.
-			if (recurringSchedules != null) {
-				validateRecurringSchedules(recurringSchedules, isValidTimeZone);
-			}
-		} else {// No schedules found
-
-			validationErrorResult.addFieldError(applicationPolicy, "data.invalid.noSchedules", "app_id=" + appId);
-
-		}
+		} 
 
 	}
 
@@ -819,6 +818,10 @@ public class ScheduleManager {
 					updateCount++;
 					continue;
 				}
+			}else{
+				// there is no schedule in the new policy, so the old schedules of this app should be deleted.
+				toDeletedAppIds.add(appIdInPolicy);
+				updateCount++;
 			}
 		}
 		
@@ -833,6 +836,7 @@ public class ScheduleManager {
 		}
 		for(String appId : toDeletedAppIds){
 			this.deleteSchedules(appId);
+			
 		}
 		
 		for(ApplicationSchedules schedule : toCreateScheduleList){

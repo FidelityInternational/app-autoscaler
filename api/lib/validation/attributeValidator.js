@@ -20,6 +20,19 @@ var compareDateTimes = function(startDateTime,endDateTime) {
   return moment(startDateTime,'YYYY-MM-DDTHH:mm')
     .isSameOrAfter(moment(endDateTime,'YYYY-MM-DDTHH:mm'));
 }
+var normalizeStartDate = function(object) {
+  if ( !object.hasOwnProperty("start_date") ) {
+    return '0001-01-01'
+  }  
+  return object.start_date;
+}
+var normalizeEndDate = function(object) {
+  if ( !object.hasOwnProperty("end_date") ) {
+    return '9999-12-31'
+  }  
+  return object.end_date;
+}
+
 var validateOverlappingDaysInRecurringSchedules = function(inputRecurringSchedules,property) {
   var errors = [];
   var errorCount = 0;
@@ -29,10 +42,16 @@ var validateOverlappingDaysInRecurringSchedules = function(inputRecurringSchedul
           inputRecurringSchedules[j].hasOwnProperty(property)) {
         if(intersect(inputRecurringSchedules[i][property],
             inputRecurringSchedules[j][property]).length > 0) {
-          if(inputRecurringSchedules[i].start_time <=
-            inputRecurringSchedules[j].end_time && 
-            inputRecurringSchedules[i].end_time >=
-              inputRecurringSchedules[j].start_time) {
+  
+            var normalizeStartDate_I = normalizeStartDate(inputRecurringSchedules[i]);
+            var normalizeEndDate_I = normalizeEndDate(inputRecurringSchedules[i]);
+            var normalizeStartDate_J = normalizeStartDate(inputRecurringSchedules[j]);
+            var normalizeEndDate_J = normalizeEndDate(inputRecurringSchedules[j]);
+
+            if((inputRecurringSchedules[i].start_time <=inputRecurringSchedules[j].end_time) && 
+             (inputRecurringSchedules[i].end_time >=inputRecurringSchedules[j].start_time) &&
+             (normalizeStartDate_I <= normalizeEndDate_J) && 
+             (normalizeEndDate_I >= normalizeStartDate_J)) {
             let error = createErrorResponse('recurring_schedule.start_time',
                 'recurring_schedule.start_time and recurring_schedule.end_time ' + 
                 'ranges are overlapping',inputRecurringSchedules[j],
@@ -44,6 +63,7 @@ var validateOverlappingDaysInRecurringSchedules = function(inputRecurringSchedul
       }
     }
   }
+
   return errors;
 }
 
@@ -259,15 +279,18 @@ var validateScalingRuleThresholdValue = function(scalingRules){
 var validatePolicyJSONValues = function(policyJson) {
   var errorCount = 0;
   var errors = [];
+
+  if(policyJson.instance_min_count >= policyJson.instance_max_count) {
+    errors[errorCount++] = createErrorResponse('instance_min_count','instance_min_count and ' + 
+        'instance_max_count values are not compatible', policyJson,'instance_min_count ' + 
+        policyJson.instance_min_count + ' is higher or equal to instance_max_count ' + 
+        policyJson.instance_max_count + ' in policy_json');
+  }
+  
   if(policyJson.schedules) {
     var inputRecurringSchedules = policyJson.schedules.recurring_schedule;
     var inputSpecificDates = policyJson.schedules.specific_date;
-    if(policyJson.instance_min_count >= policyJson.instance_max_count) {
-      errors[errorCount++] = createErrorResponse('instance_min_count','instance_min_count and ' + 
-          'instance_max_count values are not compatible', policyJson,'instance_min_count ' + 
-          policyJson.instance_min_count + ' is higher or equal to instance_max_count ' + 
-          policyJson.instance_max_count + ' in policy_json');
-    }
+
     var specificDateErrors = [];
     var recurringScheduleErrors = [];
     if(inputSpecificDates) {
