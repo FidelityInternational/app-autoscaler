@@ -91,6 +91,7 @@ func (as *appStreamer) streamMetrics() {
 }
 
 func (as *appStreamer) processEvent(event *events.Envelope) {
+	var err error
 	if event.GetEventType() == events.Envelope_ContainerMetric {
 		as.logger.Debug("process-event-get-containermetric-event", lager.Data{"event": event})
 
@@ -107,7 +108,7 @@ func (as *appStreamer) processEvent(event *events.Envelope) {
 		metric = noaa.GetInstanceCpuPercentageMetricFromContainerMetricEvent(as.sclock.Now().UnixNano(), as.appId, event)
 		as.logger.Debug("process-event-get-cpupercentage-metric", lager.Data{"metric": metric})
 		if metric != nil {
-			err := as.database.SaveMetric(metric)
+			as.dataChan <- metric
 			if err != nil {
 				as.logger.Error("process-event-save-metric", err, lager.Data{"metric": metric})
 			}
