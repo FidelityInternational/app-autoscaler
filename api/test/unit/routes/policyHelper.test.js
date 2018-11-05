@@ -6,17 +6,19 @@ var fs = require('fs');
 var path = require('path');
 var uuidV4 = require('uuid/v4');
 var settings = require(path.join(__dirname, '../../../lib/config/setting.js'))((JSON.parse(
-  fs.readFileSync(path.join(__dirname, '../../../config/settings.json'), 'utf8'))));
+	fs.readFileSync(path.join(__dirname, '../../../config/settings.json'), 'utf8'))));
+var relativePath = path.relative(process.cwd(), path.join(__dirname, "../../../../test-certs"));
+var testSetting = require(path.join(__dirname, '../test.helper.js'))(relativePath,settings);
+var models = require('../../../lib/models')(testSetting.db, function(){});
 var API = require('../../../app.js');
 var app;
 var publicApp;
 var servers;
-var policy = require('../../../lib/models')(settings.db).policy_json;
+var policy = models.policy_json;
 var logger = require('../../../lib/log/logger');
 var nock = require('nock');
 var HttpStatus = require('http-status-codes');
-var policyHelper = require('../../../lib/routes/policyHelper')(settings.db);
-var schedulerURI = process.env.SCHEDULER_URI;
+var policyHelper = require('../../../lib/routes/policyHelper')(models);
 
 
 describe('Policy Route helper ', function() {
@@ -24,16 +26,21 @@ describe('Policy Route helper ', function() {
 
     before(function() {
 		fakePolicy = JSON.parse(fs.readFileSync(__dirname+'/../fakePolicy.json', 'utf8'));
-		servers = API(path.join(__dirname, "../../../config/settings.json"));
+		servers = API(testSetting, function(){});
 	    app = servers.internalServer;
 	    publicApp = servers.publicServer;
 	})
     after(function(done){
     	app.close(function(){
 	      publicApp.close(done);
-	    });
+		});
   	})
 	beforeEach(function() {
+		if (settings.serviceOffering) {
+			nock(settings.serviceOffering.serviceBroker.uri)
+			.get(/\/v1\/apps\/.+\/service_bindings/)
+			.reply(200, {"message": "binding_info_exists"});
+		}
 		return policy.truncate();
 	});
 

@@ -7,11 +7,8 @@ import (
 	"autoscaler/models"
 
 	"code.cloudfoundry.org/lager"
-	"github.com/cloudfoundry/sonde-go/events"
-	"github.com/gogo/protobuf/proto"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"github.com/onsi/gomega/gstruct"
 
 	"encoding/json"
 	"errors"
@@ -25,7 +22,7 @@ var testUrlMetricHistories = "http://localhost/v1/apps/an-app-id/metric_historie
 var _ = Describe("MetricHandler", func() {
 
 	var (
-		cfc      *fakes.FakeCfClient
+		cfc      *fakes.FakeCFClient
 		consumer *fakes.FakeNoaaConsumer
 		handler  *MetricHandler
 		database *fakes.FakeInstanceMetricsDB
@@ -39,129 +36,12 @@ var _ = Describe("MetricHandler", func() {
 	)
 
 	BeforeEach(func() {
-		cfc = &fakes.FakeCfClient{}
+		cfc = &fakes.FakeCFClient{}
 		consumer = &fakes.FakeNoaaConsumer{}
 		logger := lager.NewLogger("handler-test")
 		database = &fakes.FakeInstanceMetricsDB{}
 		resp = httptest.NewRecorder()
 		handler = NewMetricHandler(logger, cfc, consumer, database)
-	})
-
-	Describe("GetMemoryMetrics", func() {
-		JustBeforeEach(func() {
-			handler.GetMemoryMetric(resp, nil, map[string]string{"appid": "an-app-id"})
-		})
-
-		Context("when retrieving container metrics fail", func() {
-			BeforeEach(func() {
-				consumer.ContainerEnvelopesReturns(nil, errors.New("an error"))
-			})
-
-			It("returns a 500", func() {
-				Expect(resp.Code).To(Equal(http.StatusInternalServerError))
-
-				errJson := &models.ErrorResponse{}
-				err = json.Unmarshal(resp.Body.Bytes(), errJson)
-
-				Expect(err).ToNot(HaveOccurred())
-				Expect(errJson).To(Equal(&models.ErrorResponse{
-					Code:    "Interal-Server-Error",
-					Message: "Error getting memory metrics from doppler",
-				}))
-			})
-		})
-
-		Context("when retrieving container metrics succeeds", func() {
-			Context("container metrics is not empty", func() {
-				BeforeEach(func() {
-					timestamp := int64(111111)
-					consumer.ContainerEnvelopesReturns([]*events.Envelope{
-						&events.Envelope{
-							ContainerMetric: &events.ContainerMetric{
-								ApplicationId:    proto.String("an-app-id"),
-								InstanceIndex:    proto.Int32(0),
-								MemoryBytes:      proto.Uint64(100000000),
-								MemoryBytesQuota: proto.Uint64(300000000),
-							},
-							Timestamp: &timestamp,
-						},
-						&events.Envelope{
-							ContainerMetric: &events.ContainerMetric{
-								ApplicationId:    proto.String("an-app-id"),
-								InstanceIndex:    proto.Int32(1),
-								MemoryBytes:      proto.Uint64(200000000),
-								MemoryBytesQuota: proto.Uint64(300000000),
-							},
-							Timestamp: &timestamp,
-						},
-					}, nil)
-				})
-
-				It("returns a 200 response with metrics", func() {
-					Expect(resp.Code).To(Equal(http.StatusOK))
-
-					metrics := []models.AppInstanceMetric{}
-					err = json.Unmarshal(resp.Body.Bytes(), &metrics)
-
-					Expect(err).ToNot(HaveOccurred())
-					Expect(metrics).To(HaveLen(4))
-
-					Expect(metrics[0]).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
-						"AppId":         Equal("an-app-id"),
-						"InstanceIndex": BeEquivalentTo(0),
-						"Name":          Equal(models.MetricNameMemoryUsed),
-						"Unit":          Equal(models.UnitMegaBytes),
-						"Value":         Equal("95"),
-						"Timestamp":     BeEquivalentTo(111111),
-					}))
-
-					Expect(metrics[1]).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
-						"AppId":         Equal("an-app-id"),
-						"InstanceIndex": BeEquivalentTo(0),
-						"Name":          Equal(models.MetricNameMemoryUtil),
-						"Unit":          Equal(models.UnitPercentage),
-						"Value":         Equal("33"),
-						"Timestamp":     BeEquivalentTo(111111),
-					}))
-
-					Expect(metrics[2]).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
-						"AppId":         Equal("an-app-id"),
-						"InstanceIndex": BeEquivalentTo(1),
-						"Name":          Equal(models.MetricNameMemoryUsed),
-						"Unit":          Equal(models.UnitMegaBytes),
-						"Value":         Equal("191"),
-						"Timestamp":     BeEquivalentTo(111111),
-					}))
-
-					Expect(metrics[3]).To(gstruct.MatchFields(gstruct.IgnoreExtras, gstruct.Fields{
-						"AppId":         Equal("an-app-id"),
-						"InstanceIndex": BeEquivalentTo(1),
-						"Name":          Equal(models.MetricNameMemoryUtil),
-						"Unit":          Equal(models.UnitPercentage),
-						"Value":         Equal("67"),
-						"Timestamp":     BeEquivalentTo(111111),
-					}))
-
-				})
-			})
-
-			Context("container metrics is empty", func() {
-				BeforeEach(func() {
-					consumer.ContainerEnvelopesReturns([]*events.Envelope{}, nil)
-				})
-
-				It("returns a 200 with empty metrics", func() {
-					Expect(resp.Code).To(Equal(http.StatusOK))
-
-					metrics := []models.AppInstanceMetric{}
-					err = json.Unmarshal(resp.Body.Bytes(), &metrics)
-
-					Expect(err).ToNot(HaveOccurred())
-					Expect(metrics).To(BeEmpty())
-				})
-			})
-
-		})
 	})
 
 	Describe("GetMetricHistory", func() {
@@ -170,6 +50,70 @@ var _ = Describe("MetricHandler", func() {
 		})
 
 		Context("when request query string is invalid", func() {
+
+			Context("when there are multiple instanceindex pararmeters in query string", func() {
+				BeforeEach(func() {
+					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?instanceindex=123&instanceindex=231", nil)
+					Expect(err).ToNot(HaveOccurred())
+
+				})
+
+				It("returns 400", func() {
+					Expect(resp.Code).To(Equal(http.StatusBadRequest))
+
+					errJson := &models.ErrorResponse{}
+					err = json.Unmarshal(resp.Body.Bytes(), errJson)
+
+					Expect(err).ToNot(HaveOccurred())
+					Expect(errJson).To(Equal(&models.ErrorResponse{
+						Code:    "Bad-Request",
+						Message: "Incorrect instanceIndex parameter in query string",
+					}))
+				})
+			})
+
+			Context("when instanceindex is not a number", func() {
+				BeforeEach(func() {
+					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?instanceindex=abc", nil)
+					Expect(err).ToNot(HaveOccurred())
+
+				})
+
+				It("returns 400", func() {
+					Expect(resp.Code).To(Equal(http.StatusBadRequest))
+
+					errJson := &models.ErrorResponse{}
+					err = json.Unmarshal(resp.Body.Bytes(), errJson)
+
+					Expect(err).ToNot(HaveOccurred())
+					Expect(errJson).To(Equal(&models.ErrorResponse{
+						Code:    "Bad-Request",
+						Message: "Error parsing instanceIndex",
+					}))
+				})
+			})
+
+			Context("when instanceindex is smaller than 0", func() {
+				BeforeEach(func() {
+					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?instanceindex=-1", nil)
+					Expect(err).ToNot(HaveOccurred())
+
+				})
+
+				It("returns 400", func() {
+					Expect(resp.Code).To(Equal(http.StatusBadRequest))
+
+					errJson := &models.ErrorResponse{}
+					err = json.Unmarshal(resp.Body.Bytes(), errJson)
+
+					Expect(err).ToNot(HaveOccurred())
+					Expect(errJson).To(Equal(&models.ErrorResponse{
+						Code:    "Bad-Request",
+						Message: "InstanceIndex must be greater than or equal to 0",
+					}))
+				})
+			})
+
 			Context("when there are multiple start pararmeters in query string", func() {
 				BeforeEach(func() {
 					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?start=123&start=231", nil)
@@ -291,7 +235,7 @@ var _ = Describe("MetricHandler", func() {
 					Expect(err).ToNot(HaveOccurred())
 					Expect(errJson).To(Equal(&models.ErrorResponse{
 						Code:    "Bad-Request",
-						Message: fmt.Sprintf("Incorrect order parameter in query string, the value can only be %s or %s", db.ASC, db.DESC),
+						Message: fmt.Sprintf("Incorrect order parameter in query string, the value can only be %s or %s", db.ASCSTR, db.DESCSTR),
 					}))
 				})
 			})
@@ -301,12 +245,13 @@ var _ = Describe("MetricHandler", func() {
 		Context("when request query string is valid", func() {
 			Context("when start,end and order are all in query string", func() {
 				BeforeEach(func() {
-					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?start=123&end=567&order=desc", nil)
+					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?instanceindex=0&start=123&end=567&order=desc", nil)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
 				It("queries metrics from database with the given start, end and order ", func() {
-					appid, name, start, end, order := database.RetrieveInstanceMetricsArgsForCall(0)
+					appid, instanceIndex, name, start, end, order := database.RetrieveInstanceMetricsArgsForCall(0)
+					Expect(instanceIndex).To(Equal(0))
 					Expect(appid).To(Equal("an-app-id"))
 					Expect(name).To(Equal("a-metric-type"))
 					Expect(start).To(Equal(int64(123)))
@@ -316,14 +261,27 @@ var _ = Describe("MetricHandler", func() {
 
 			})
 
+			Context("when there is no instanceindex in query string", func() {
+				BeforeEach(func() {
+					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?start=123&end=567&order=desc", nil)
+					Expect(err).ToNot(HaveOccurred())
+				})
+
+				It("queries metrics from database with instanceindex  -1", func() {
+					_, instanceIndex, _, _, _, _ := database.RetrieveInstanceMetricsArgsForCall(0)
+					Expect(instanceIndex).To(Equal(-1))
+				})
+
+			})
+
 			Context("when there is no start time in query string", func() {
 				BeforeEach(func() {
-					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?end=123&order=desc", nil)
+					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?instanceindex=0&end=123&order=desc", nil)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
 				It("queries metrics from database with start time  0", func() {
-					_, _, start, _, _ := database.RetrieveInstanceMetricsArgsForCall(0)
+					_, _, _, start, _, _ := database.RetrieveInstanceMetricsArgsForCall(0)
 					Expect(start).To(Equal(int64(0)))
 				})
 
@@ -331,12 +289,12 @@ var _ = Describe("MetricHandler", func() {
 
 			Context("when there is no end time in query string", func() {
 				BeforeEach(func() {
-					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?start=123&order=desc", nil)
+					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?instanceindex=0&start=123&order=desc", nil)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
 				It("queries metrics from database with end time -1 ", func() {
-					_, _, _, end, _ := database.RetrieveInstanceMetricsArgsForCall(0)
+					_, _, _, _, end, _ := database.RetrieveInstanceMetricsArgsForCall(0)
 					Expect(end).To(Equal(int64(-1)))
 				})
 
@@ -344,12 +302,12 @@ var _ = Describe("MetricHandler", func() {
 
 			Context("when there is no order in query string", func() {
 				BeforeEach(func() {
-					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?start=123&end=567", nil)
+					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?instanceindex=0&start=123&end=567", nil)
 					Expect(err).ToNot(HaveOccurred())
 				})
 
 				It("queries metrics from database with end time -1 ", func() {
-					_, _, _, _, order := database.RetrieveInstanceMetricsArgsForCall(0)
+					_, _, _, _, _, order := database.RetrieveInstanceMetricsArgsForCall(0)
 					Expect(order).To(Equal(db.ASC))
 				})
 
@@ -357,7 +315,7 @@ var _ = Describe("MetricHandler", func() {
 
 			Context("when query database succeeds", func() {
 				BeforeEach(func() {
-					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?start=123&end=567&order=desc", nil)
+					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?instanceindex=0&start=123&end=567&order=desc", nil)
 					Expect(err).ToNot(HaveOccurred())
 
 					metric1 = models.AppInstanceMetric{
@@ -372,7 +330,7 @@ var _ = Describe("MetricHandler", func() {
 
 					metric2 = models.AppInstanceMetric{
 						AppId:         "an-app-id",
-						InstanceIndex: 1,
+						InstanceIndex: 0,
 						CollectedAt:   111122,
 						Name:          "a-metric-type",
 						Unit:          "metric-unit",
@@ -395,7 +353,7 @@ var _ = Describe("MetricHandler", func() {
 
 			Context("when query database fails", func() {
 				BeforeEach(func() {
-					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?start=123&end=567&order=desc", nil)
+					req, err = http.NewRequest(http.MethodGet, testUrlMetricHistories+"?instanceindex=0&start=123&end=567&order=desc", nil)
 					Expect(err).ToNot(HaveOccurred())
 
 					database.RetrieveInstanceMetricsReturns(nil, errors.New("database error"))

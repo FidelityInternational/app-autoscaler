@@ -1,47 +1,53 @@
 package sqldb
 
 import (
-	"code.cloudfoundry.org/lager"
 	"database/sql"
+
+	"code.cloudfoundry.org/clock"
+	"code.cloudfoundry.org/lager"
 	_ "github.com/lib/pq"
 
 	"autoscaler/db"
+	"autoscaler/healthendpoint"
 	"autoscaler/models"
 
 	"time"
 )
 
 type ScalingEngineSQLDB struct {
-	url    string
-	logger lager.Logger
-	sqldb  *sql.DB
+	dbConfig db.DatabaseConfig
+	logger   lager.Logger
+	sqldb    *sql.DB
 }
 
-func NewScalingEngineSQLDB(url string, logger lager.Logger) (*ScalingEngineSQLDB, error) {
-	sqldb, err := sql.Open(db.PostgresDriverName, url)
+func NewScalingEngineSQLDB(dbConfig db.DatabaseConfig, logger lager.Logger) (*ScalingEngineSQLDB, error) {
+	sqldb, err := sql.Open(db.PostgresDriverName, dbConfig.URL)
 	if err != nil {
-		logger.Error("open-scaling-engine-db", err, lager.Data{"url": url})
+		logger.Error("open-scaling-engine-db", err, lager.Data{"dbConfig": dbConfig})
 		return nil, err
 	}
 
 	err = sqldb.Ping()
 	if err != nil {
 		sqldb.Close()
-		logger.Error("ping-scaling-engine-db", err, lager.Data{"url": url})
+		logger.Error("ping-scaling-engine-db", err, lager.Data{"dbConfig": dbConfig})
 		return nil, err
 	}
 
+	sqldb.SetConnMaxLifetime(dbConfig.ConnectionMaxLifetime)
+	sqldb.SetMaxIdleConns(dbConfig.MaxIdleConnections)
+	sqldb.SetMaxOpenConns(dbConfig.MaxOpenConnections)
 	return &ScalingEngineSQLDB{
-		url:    url,
-		logger: logger,
-		sqldb:  sqldb,
+		dbConfig: dbConfig,
+		logger:   logger,
+		sqldb:    sqldb,
 	}, nil
 }
 
 func (sdb *ScalingEngineSQLDB) Close() error {
 	err := sdb.sqldb.Close()
 	if err != nil {
-		sdb.logger.Error("close-scaling-engine-db", err, lager.Data{"url": sdb.url})
+		sdb.logger.Error("close-scaling-engine-db", err, lager.Data{"dbConfig": sdb.dbConfig})
 		return err
 	}
 	return nil
@@ -60,17 +66,19 @@ func (sdb *ScalingEngineSQLDB) SaveScalingHistory(history *models.AppScalingHist
 	return err
 }
 
-func (sdb *ScalingEngineSQLDB) RetrieveScalingHistories(appId string, start int64, end int64, orderType db.OrderType) ([]*models.AppScalingHistory, error) {
+func (sdb *ScalingEngineSQLDB) RetrieveScalingHistories(appId string, start int64, end int64, orderType db.OrderType, includeAll bool) ([]*models.AppScalingHistory, error) {
 	var orderStr string
 	if orderType == db.DESC {
 		orderStr = db.DESCSTR
 	} else {
 		orderStr = db.ASCSTR
 	}
+
 	query := "SELECT timestamp, scalingtype, status, oldinstances, newinstances, reason, message, error FROM scalinghistory WHERE" +
 		" appid = $1 " +
 		" AND timestamp >= $2" +
-		" AND timestamp <= $3 ORDER BY timestamp " + orderStr
+		" AND timestamp <= $3" +
+		" ORDER BY timestamp " + orderStr
 
 	if end < 0 {
 		end = time.Now().UnixNano()
@@ -107,7 +115,10 @@ func (sdb *ScalingEngineSQLDB) RetrieveScalingHistories(appId string, start int6
 			Message:      message,
 			Error:        errorMsg,
 		}
-		histories = append(histories, &history)
+
+		if includeAll || history.Status != models.ScalingStatusIgnored {
+			histories = append(histories, &history)
+		}
 	}
 	return histories, nil
 }
@@ -121,33 +132,32 @@ func (sdb *ScalingEngineSQLDB) PruneScalingHistories(before int64) error {
 	return err
 }
 
-func (sdb *ScalingEngineSQLDB) CanScaleApp(appId string) (bool, error) {
-	query := "SELECT expireat FROM scalingcooldown where appid = $1"
+func (sdb *ScalingEngineSQLDB) CanScaleApp(appId string) (bool, int64, error) {
+	query := "SELECT expireat FROM scalingcooldown WHERE appid = $1"
 	rows, err := sdb.sqldb.Query(query, appId)
 	if err != nil {
 		sdb.logger.Error("can-scale-app-query-record", err, lager.Data{"query": query, "appid": appId})
-		return false, err
+		return false, 0, err
 	}
 	defer rows.Close()
 
+	var expireAt int64 = 0
 	if rows.Next() {
-		var expireAt int64
 		if err = rows.Scan(&expireAt); err != nil {
 			sdb.logger.Error("can-scale-app-scan", err, lager.Data{"query": query, "appid": appId})
-			return false, err
+			return false, expireAt, err
 		}
 		if expireAt < time.Now().UnixNano() {
-			return true, nil
+			return true, expireAt, nil
 		} else {
-			return false, nil
+			return false, expireAt, nil
 		}
 	}
-
-	return true, nil
+	return true, expireAt, nil
 }
 
 func (sdb *ScalingEngineSQLDB) UpdateScalingCooldownExpireTime(appId string, expireAt int64) error {
-	_, err := sdb.sqldb.Exec("DELETE FROM scalingcooldown where appid = $1", appId)
+	_, err := sdb.sqldb.Exec("DELETE FROM scalingcooldown WHERE appid = $1", appId)
 	if err != nil {
 		sdb.logger.Error("update-scaling-cooldown-time-delete", err, lager.Data{"appid": appId})
 		return err
@@ -230,4 +240,14 @@ func (sdb *ScalingEngineSQLDB) SetActiveSchedule(appId string, schedule *models.
 		sdb.logger.Error("failed-set-active-scheudle-insert", err, lager.Data{"appid": appId, "schedule": schedule})
 	}
 	return err
+}
+
+func (sdb *ScalingEngineSQLDB) EmitHealthMetrics(h healthendpoint.Health, cclock clock.Clock, interval time.Duration) {
+	go func() {
+		ticker := cclock.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C() {
+			h.Set("openConnection_scalingEngineDB", float64(sdb.sqldb.Stats().OpenConnections))
+		}
+	}()
 }

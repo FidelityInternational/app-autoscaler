@@ -9,6 +9,7 @@ import (
 	"gopkg.in/yaml.v2"
 
 	"autoscaler/cf"
+	"autoscaler/db"
 	. "autoscaler/metricscollector/config"
 )
 
@@ -43,33 +44,6 @@ server:
 			})
 		})
 
-		Context("when it gives a non integer port", func() {
-			BeforeEach(func() {
-				configBytes = []byte(`
-server:
-  port: port
-`)
-			})
-
-			It("should error", func() {
-				Expect(err).To(BeAssignableToTypeOf(&yaml.TypeError{}))
-			})
-		})
-
-		Context("when it gives an invalid time duration", func() {
-			BeforeEach(func() {
-				configBytes = []byte(`
-collector:
-  refresh_interval: 20a
-  collect_interval: 10s  
-`)
-			})
-
-			It("should error", func() {
-				Expect(err).To(BeAssignableToTypeOf(&yaml.TypeError{}))
-			})
-		})
-
 		Context("with valid yaml", func() {
 			BeforeEach(func() {
 				configBytes = []byte(`
@@ -80,44 +54,65 @@ cf:
   password: admin
   client_id: client-id
   secret: client-secret
+  skip_ssl_validation: false
 server:
   port: 8989
   tls:
     key_file: /var/vcap/jobs/autoscaler/config/certs/server.key
     cert_file: /var/vcap/jobs/autoscaler/config/certs/server.crt
     ca_file: /var/vcap/jobs/autoscaler/config/certs/ca.crt
+  node_addrs: [address1, address2]
+  node_index: 1
 logging:
   level: DebuG
 db:
-  policy_db_url: postgres://pqgotest:password@localhost/pqgotest
-  instance_metrics_db_url: postgres://pqgotest:password@localhost/pqgotest
+  policy_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
+  instance_metrics_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
 collector:
   refresh_interval: 20s
   collect_interval: 10s
   collect_method: polling
-lock:
-  lock_ttl: 15s
-  lock_retry_interval: 10s
-  consul_cluster_config: http://127.0.0.1:8500
+  save_interval: 5s
 `)
 			})
 
 			It("returns the config", func() {
 				Expect(err).NotTo(HaveOccurred())
 
-				Expect(conf.Cf.Api).To(Equal("https://api.example.com"))
-				Expect(conf.Cf.GrantType).To(Equal("password"))
-				Expect(conf.Cf.Username).To(Equal("admin"))
-				Expect(conf.Cf.Password).To(Equal("admin"))
-				Expect(conf.Cf.ClientId).To(Equal("client-id"))
-				Expect(conf.Cf.Secret).To(Equal("client-secret"))
+				Expect(conf.CF.API).To(Equal("https://api.example.com"))
+				Expect(conf.CF.GrantType).To(Equal("password"))
+				Expect(conf.CF.Username).To(Equal("admin"))
+				Expect(conf.CF.Password).To(Equal("admin"))
+				Expect(conf.CF.ClientID).To(Equal("client-id"))
+				Expect(conf.CF.Secret).To(Equal("client-secret"))
+				Expect(conf.CF.SkipSSLValidation).To(Equal(false))
 
 				Expect(conf.Server.Port).To(Equal(8989))
 
 				Expect(conf.Logging.Level).To(Equal("debug"))
 
-				Expect(conf.Db.PolicyDbUrl).To(Equal("postgres://pqgotest:password@localhost/pqgotest"))
-				Expect(conf.Db.InstanceMetricsDbUrl).To(Equal("postgres://pqgotest:password@localhost/pqgotest"))
+				Expect(conf.DB.PolicyDB).To(Equal(
+					db.DatabaseConfig{
+						URL:                   "postgres://pqgotest:password@localhost/pqgotest",
+						MaxOpenConnections:    10,
+						MaxIdleConnections:    5,
+						ConnectionMaxLifetime: 60 * time.Second,
+					}))
+				Expect(conf.DB.InstanceMetricsDB).To(Equal(
+					db.DatabaseConfig{
+						URL:                   "postgres://pqgotest:password@localhost/pqgotest",
+						MaxOpenConnections:    10,
+						MaxIdleConnections:    5,
+						ConnectionMaxLifetime: 60 * time.Second,
+					}))
 
 				Expect(conf.Collector.RefreshInterval).To(Equal(20 * time.Second))
 				Expect(conf.Collector.CollectInterval).To(Equal(10 * time.Second))
@@ -126,10 +121,8 @@ lock:
 				Expect(conf.Server.TLS.KeyFile).To(Equal("/var/vcap/jobs/autoscaler/config/certs/server.key"))
 				Expect(conf.Server.TLS.CertFile).To(Equal("/var/vcap/jobs/autoscaler/config/certs/server.crt"))
 				Expect(conf.Server.TLS.CACertFile).To(Equal("/var/vcap/jobs/autoscaler/config/certs/ca.crt"))
-
-				Expect(conf.Lock.ConsulClusterConfig).To(Equal("http://127.0.0.1:8500"))
-				Expect(conf.Lock.LockRetryInterval).To(Equal(10 * time.Second))
-				Expect(conf.Lock.LockTTL).To(Equal(15 * time.Second))
+				Expect(conf.Server.NodeAddrs).To(Equal([]string{"address1", "address2"}))
+				Expect(conf.Server.NodeIndex).To(Equal(1))
 			})
 		})
 
@@ -139,23 +132,491 @@ lock:
 cf:
   api: https://api.example.com
 db:
-  policy_db_url: postgres://pqgotest:password@localhost/pqgotest
-  instance_metrics_db_url: postgres://pqgotest:password@localhost/pqgotest
+  policy_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+  instance_metrics_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
 `)
 			})
 
 			It("returns default values", func() {
 				Expect(err).NotTo(HaveOccurred())
 
-				Expect(conf.Cf.GrantType).To(Equal(cf.GrantTypePassword))
+				Expect(conf.CF.GrantType).To(Equal(cf.GrantTypePassword))
+				Expect(conf.CF.SkipSSLValidation).To(Equal(false))
 				Expect(conf.Server.Port).To(Equal(8080))
 				Expect(conf.Logging.Level).To(Equal(DefaultLoggingLevel))
+				Expect(conf.DB.PolicyDB).To(Equal(
+					db.DatabaseConfig{
+						URL:                   "postgres://pqgotest:password@localhost/pqgotest",
+						MaxOpenConnections:    0,
+						MaxIdleConnections:    0,
+						ConnectionMaxLifetime: 0 * time.Second,
+					}))
+				Expect(conf.DB.InstanceMetricsDB).To(Equal(
+					db.DatabaseConfig{
+						URL:                   "postgres://pqgotest:password@localhost/pqgotest",
+						MaxOpenConnections:    0,
+						MaxIdleConnections:    0,
+						ConnectionMaxLifetime: 0 * time.Second,
+					}))
 				Expect(conf.Collector.RefreshInterval).To(Equal(DefaultRefreshInterval))
 				Expect(conf.Collector.CollectInterval).To(Equal(DefaultCollectInterval))
 				Expect(conf.Collector.CollectMethod).To(Equal(CollectMethodStreaming))
+			})
+		})
 
-				Expect(conf.Lock.LockRetryInterval).To(Equal(DefaultRetryInterval))
-				Expect(conf.Lock.LockTTL).To(Equal(DefaultLockTTL))
+		Context("when it gives a non integer port", func() {
+			BeforeEach(func() {
+				configBytes = []byte(`
+server:
+  port: port
+`)
+			})
+
+			It("should error", func() {
+				Expect(err).To(BeAssignableToTypeOf(&yaml.TypeError{}))
+				Expect(err).To(MatchError(MatchRegexp("cannot unmarshal.*into int")))
+			})
+		})
+
+		Context("when it gives a non integer max_open_connections of policydb", func() {
+			BeforeEach(func() {
+				configBytes = []byte(`
+cf:
+  api: https://api.example.com
+  grant_type: PassWord
+  username: admin
+  password: admin
+  client_id: client-id
+  secret: client-secret
+  skip_ssl_validation: false
+server:
+  port: 8989
+  tls:
+    key_file: /var/vcap/jobs/autoscaler/config/certs/server.key
+    cert_file: /var/vcap/jobs/autoscaler/config/certs/server.crt
+    ca_file: /var/vcap/jobs/autoscaler/config/certs/ca.crt
+logging:
+  level: DebuG
+db:
+  policy_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: NOT-INTEGER-VALUE
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
+  instance_metrics_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
+collector:
+  refresh_interval: 20s
+  collect_interval: 10s
+  collect_method: polling
+  save_interval: 5s
+`)
+			})
+
+			It("should error", func() {
+				Expect(err).To(BeAssignableToTypeOf(&yaml.TypeError{}))
+				Expect(err).To(MatchError(MatchRegexp("cannot unmarshal.*into int")))
+			})
+		})
+
+		Context("when it gives a non integer max_idle_connections of policydb", func() {
+			BeforeEach(func() {
+				configBytes = []byte(`
+cf:
+  api: https://api.example.com
+  grant_type: PassWord
+  username: admin
+  password: admin
+  client_id: client-id
+  secret: client-secret
+  skip_ssl_validation: false
+server:
+  port: 8989
+  tls:
+    key_file: /var/vcap/jobs/autoscaler/config/certs/server.key
+    cert_file: /var/vcap/jobs/autoscaler/config/certs/server.crt
+    ca_file: /var/vcap/jobs/autoscaler/config/certs/ca.crt
+logging:
+  level: DebuG
+db:
+  policy_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: NOT-INTEGER-VALUE
+    connection_max_lifetime: 60s
+  instance_metrics_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
+collector:
+  refresh_interval: 20s
+  collect_interval: 10s
+  collect_method: polling
+  save_interval: 5s
+`)
+			})
+
+			It("should error", func() {
+				Expect(err).To(BeAssignableToTypeOf(&yaml.TypeError{}))
+				Expect(err).To(MatchError(MatchRegexp("cannot unmarshal.*into int")))
+			})
+		})
+
+		Context("when connection_max_lifetime of policydb is not a time duration", func() {
+			BeforeEach(func() {
+				configBytes = []byte(`
+cf:
+  api: https://api.example.com
+  grant_type: PassWord
+  username: admin
+  password: admin
+  client_id: client-id
+  secret: client-secret
+  skip_ssl_validation: false
+server:
+  port: 8989
+  tls:
+    key_file: /var/vcap/jobs/autoscaler/config/certs/server.key
+    cert_file: /var/vcap/jobs/autoscaler/config/certs/server.crt
+    ca_file: /var/vcap/jobs/autoscaler/config/certs/ca.crt
+logging:
+  level: DebuG
+db:
+  policy_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 6K
+  instance_metrics_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
+collector:
+  refresh_interval: 20s
+  collect_interval: 10s
+  collect_method: polling
+  save_interval: 5s
+`)
+			})
+
+			It("should error", func() {
+				Expect(err).To(BeAssignableToTypeOf(&yaml.TypeError{}))
+				Expect(err).To(MatchError(MatchRegexp("cannot unmarshal .* into time.Duration")))
+			})
+		})
+
+		Context("when it gives a non integer max_open_connections of instance_metrics_db", func() {
+			BeforeEach(func() {
+				configBytes = []byte(`
+cf:
+  api: https://api.example.com
+  grant_type: PassWord
+  username: admin
+  password: admin
+  client_id: client-id
+  secret: client-secret
+  skip_ssl_validation: false
+server:
+  port: 8989
+  tls:
+    key_file: /var/vcap/jobs/autoscaler/config/certs/server.key
+    cert_file: /var/vcap/jobs/autoscaler/config/certs/server.crt
+    ca_file: /var/vcap/jobs/autoscaler/config/certs/ca.crt
+logging:
+  level: DebuG
+db:
+  policy_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: NOT-INTEGER-VALUE
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
+  instance_metrics_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
+collector:
+  refresh_interval: 20s
+  collect_interval: 10s
+  collect_method: polling
+  save_interval: 5s
+`)
+			})
+
+			It("should error", func() {
+				Expect(err).To(BeAssignableToTypeOf(&yaml.TypeError{}))
+				Expect(err).To(MatchError(MatchRegexp("cannot unmarshal.*into int")))
+			})
+		})
+
+		Context("when it gives a non integer max_idle_connections of instance_metrics_db", func() {
+			BeforeEach(func() {
+				configBytes = []byte(`
+cf:
+  api: https://api.example.com
+  grant_type: PassWord
+  username: admin
+  password: admin
+  client_id: client-id
+  secret: client-secret
+  skip_ssl_validation: false
+server:
+  port: 8989
+  tls:
+    key_file: /var/vcap/jobs/autoscaler/config/certs/server.key
+    cert_file: /var/vcap/jobs/autoscaler/config/certs/server.crt
+    ca_file: /var/vcap/jobs/autoscaler/config/certs/ca.crt
+logging:
+  level: DebuG
+db:
+  policy_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
+  instance_metrics_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: NOT-INTEGER-VALUE
+    connection_max_lifetime: 60s
+collector:
+  refresh_interval: 20s
+  collect_interval: 10s
+  collect_method: polling
+  save_interval: 5s
+`)
+			})
+
+			It("should error", func() {
+				Expect(err).To(BeAssignableToTypeOf(&yaml.TypeError{}))
+				Expect(err).To(MatchError(MatchRegexp("cannot unmarshal.*into int")))
+			})
+		})
+
+		Context("when connection_max_lifetime of instance_metrics_db is not a time duration", func() {
+			BeforeEach(func() {
+				configBytes = []byte(`
+cf:
+  api: https://api.example.com
+  grant_type: PassWord
+  username: admin
+  password: admin
+  client_id: client-id
+  secret: client-secret
+  skip_ssl_validation: false
+server:
+  port: 8989
+  tls:
+    key_file: /var/vcap/jobs/autoscaler/config/certs/server.key
+    cert_file: /var/vcap/jobs/autoscaler/config/certs/server.crt
+    ca_file: /var/vcap/jobs/autoscaler/config/certs/ca.crt
+logging:
+  level: DebuG
+db:
+  policy_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
+  instance_metrics_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 6k
+collector:
+  refresh_interval: 20s
+  collect_interval: 10s
+  collect_method: polling
+  save_interval: 5s
+`)
+			})
+
+			It("should error", func() {
+				Expect(err).To(BeAssignableToTypeOf(&yaml.TypeError{}))
+				Expect(err).To(MatchError(MatchRegexp("cannot unmarshal .* into time.Duration")))
+			})
+		})
+
+		Context("when refresh_interval of collector is not a time duration", func() {
+			BeforeEach(func() {
+				configBytes = []byte(`
+cf:
+  api: https://api.example.com
+  grant_type: PassWord
+  username: admin
+  password: admin
+  client_id: client-id
+  secret: client-secret
+  skip_ssl_validation: false
+server:
+  port: 8989
+  tls:
+    key_file: /var/vcap/jobs/autoscaler/config/certs/server.key
+    cert_file: /var/vcap/jobs/autoscaler/config/certs/server.crt
+    ca_file: /var/vcap/jobs/autoscaler/config/certs/ca.crt
+logging:
+  level: DebuG
+db:
+  policy_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
+  instance_metrics_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
+collector:
+  refresh_interval: 2k
+  collect_interval: 10s
+  collect_method: polling
+  save_interval: 5s
+`)
+			})
+
+			It("should error", func() {
+				Expect(err).To(BeAssignableToTypeOf(&yaml.TypeError{}))
+				Expect(err).To(MatchError(MatchRegexp("cannot unmarshal .* into time.Duration")))
+			})
+		})
+
+		Context("when collect_interval of collector is not a time duration", func() {
+			BeforeEach(func() {
+				configBytes = []byte(`
+cf:
+  api: https://api.example.com
+  grant_type: PassWord
+  username: admin
+  password: admin
+  client_id: client-id
+  secret: client-secret
+  skip_ssl_validation: false
+server:
+  port: 8989
+  tls:
+    key_file: /var/vcap/jobs/autoscaler/config/certs/server.key
+    cert_file: /var/vcap/jobs/autoscaler/config/certs/server.crt
+    ca_file: /var/vcap/jobs/autoscaler/config/certs/ca.crt
+logging:
+  level: DebuG
+db:
+  policy_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
+  instance_metrics_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
+collector:
+  refresh_interval: 20s
+  collect_interval: 10k
+  collect_method: polling
+  save_interval: 5s
+`)
+			})
+
+			It("should error", func() {
+				Expect(err).To(BeAssignableToTypeOf(&yaml.TypeError{}))
+				Expect(err).To(MatchError(MatchRegexp("cannot unmarshal .* into time.Duration")))
+			})
+		})
+
+		Context("when save_interval of collector is not a time duration", func() {
+			BeforeEach(func() {
+				configBytes = []byte(`
+cf:
+  api: https://api.example.com
+  grant_type: PassWord
+  username: admin
+  password: admin
+  client_id: client-id
+  secret: client-secret
+  skip_ssl_validation: false
+server:
+  port: 8989
+  tls:
+    key_file: /var/vcap/jobs/autoscaler/config/certs/server.key
+    cert_file: /var/vcap/jobs/autoscaler/config/certs/server.crt
+    ca_file: /var/vcap/jobs/autoscaler/config/certs/ca.crt
+logging:
+  level: DebuG
+db:
+  policy_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
+  instance_metrics_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
+collector:
+  refresh_interval: 20s
+  collect_interval: 10s
+  collect_method: polling
+  save_interval: 5k
+`)
+			})
+
+			It("should error", func() {
+				Expect(err).To(BeAssignableToTypeOf(&yaml.TypeError{}))
+				Expect(err).To(MatchError(MatchRegexp("cannot unmarshal .* into time.Duration")))
+			})
+		})
+
+		Context("when connection_max_lifetime of instance_metrics_db is not a time duration", func() {
+			BeforeEach(func() {
+				configBytes = []byte(`
+cf:
+  api: https://api.example.com
+  grant_type: PassWord
+  username: admin
+  password: admin
+  client_id: client-id
+  secret: client-secret
+  skip_ssl_validation: false
+server:
+  port: 8989
+  tls:
+    key_file: /var/vcap/jobs/autoscaler/config/certs/server.key
+    cert_file: /var/vcap/jobs/autoscaler/config/certs/server.crt
+    ca_file: /var/vcap/jobs/autoscaler/config/certs/ca.crt
+logging:
+  level: DebuG
+db:
+  policy_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 60s
+  instance_metrics_db:
+    url: postgres://pqgotest:password@localhost/pqgotest
+    max_open_connections: 10
+    max_idle_connections: 5
+    connection_max_lifetime: 6t
+collector:
+  refresh_interval: 20s
+  collect_interval: 10s
+  collect_method: polling
+  save_interval: 5s
+`)
+			})
+
+			It("should error", func() {
+				Expect(err).To(BeAssignableToTypeOf(&yaml.TypeError{}))
+				Expect(err).To(MatchError(MatchRegexp("cannot unmarshal .* into time.Duration")))
 			})
 		})
 
@@ -164,15 +625,28 @@ db:
 	Describe("Validate", func() {
 		BeforeEach(func() {
 			conf = &Config{}
-			conf.Cf.Api = "http://api.example.com"
-			conf.Cf.GrantType = cf.GrantTypePassword
-			conf.Cf.Username = "admin"
-			conf.Db.PolicyDbUrl = "postgres://pqgotest:password@exampl.com/pqgotest"
-			conf.Db.InstanceMetricsDbUrl = "postgres://pqgotest:password@exampl.com/pqgotest"
-			conf.Lock.ConsulClusterConfig = "http://127.0.0.1:8500"
+			conf.CF.API = "http://api.example.com"
+			conf.CF.GrantType = cf.GrantTypePassword
+			conf.CF.Username = "admin"
+			conf.CF.SkipSSLValidation = false
+			conf.DB.PolicyDB = db.DatabaseConfig{
+				URL:                   "postgres://pqgotest:password@localhost/pqgotest",
+				MaxOpenConnections:    10,
+				MaxIdleConnections:    5,
+				ConnectionMaxLifetime: 60 * time.Second,
+			}
+			conf.DB.InstanceMetricsDB = db.DatabaseConfig{
+				URL:                   "postgres://pqgotest:password@localhost/pqgotest",
+				MaxOpenConnections:    10,
+				MaxIdleConnections:    5,
+				ConnectionMaxLifetime: 60 * time.Second,
+			}
 			conf.Collector.CollectInterval = time.Duration(30 * time.Second)
 			conf.Collector.RefreshInterval = time.Duration(60 * time.Second)
 			conf.Collector.CollectMethod = CollectMethodPolling
+			conf.Collector.SaveInterval = time.Duration(5 * time.Second)
+			conf.Server.NodeAddrs = []string{"address1", "address2"}
+			conf.Server.NodeIndex = 0
 		})
 
 		JustBeforeEach(func() {
@@ -187,7 +661,7 @@ db:
 
 		Context("when cf config is not valid", func() {
 			BeforeEach(func() {
-				conf.Cf.Api = ""
+				conf.CF.API = ""
 			})
 
 			It("should error", func() {
@@ -197,21 +671,21 @@ db:
 
 		Context("when policy db url is not set", func() {
 			BeforeEach(func() {
-				conf.Db.PolicyDbUrl = ""
+				conf.DB.PolicyDB.URL = ""
 			})
 
 			It("should error", func() {
-				Expect(err).To(MatchError(MatchRegexp("Configuration error: Policy DB url is empty")))
+				Expect(err).To(MatchError("Configuration error: db.policy_db.url is empty"))
 			})
 		})
 
 		Context("when metrics db url is not set", func() {
 			BeforeEach(func() {
-				conf.Db.InstanceMetricsDbUrl = ""
+				conf.DB.InstanceMetricsDB.URL = ""
 			})
 
 			It("should error", func() {
-				Expect(err).To(MatchError(MatchRegexp("Configuration error: InstanceMetrics DB url is empty")))
+				Expect(err).To(MatchError("Configuration error: db.instance_metrics_db.url is empty"))
 			})
 		})
 
@@ -221,7 +695,7 @@ db:
 			})
 
 			It("should error", func() {
-				Expect(err).To(MatchError(MatchRegexp("Configuration error: CollectInterval is 0")))
+				Expect(err).To(MatchError("Configuration error: collector.collect_interval is 0"))
 			})
 		})
 
@@ -231,7 +705,17 @@ db:
 			})
 
 			It("should error", func() {
-				Expect(err).To(MatchError(MatchRegexp("Configuration error: RefreshInterval is 0")))
+				Expect(err).To(MatchError("Configuration error: collector.refresh_interval is 0"))
+			})
+		})
+
+		Context("when save interval is 0", func() {
+			BeforeEach(func() {
+				conf.Collector.SaveInterval = time.Duration(0)
+			})
+
+			It("should error", func() {
+				Expect(err).To(MatchError("Configuration error: collector.save_interval is 0"))
 			})
 		})
 
@@ -241,8 +725,30 @@ db:
 			})
 
 			It("should error", func() {
-				Expect(err).To(MatchError(MatchRegexp("Configuration error: invalid collecting method")))
+				Expect(err).To(MatchError("Configuration error: invalid collector.collect_method"))
 			})
+		})
+
+		Context("when node index is out of range", func() {
+			Context("when node index is negative", func() {
+				BeforeEach(func() {
+					conf.Server.NodeIndex = -1
+				})
+				It("should error", func() {
+					Expect(err).To(MatchError("Configuration error: server.node_index out of range"))
+				})
+			})
+
+			Context("when node index is >= number of nodes", func() {
+				BeforeEach(func() {
+					conf.Server.NodeIndex = 2
+					conf.Server.NodeAddrs = []string{"address1", "address2"}
+				})
+				It("should error", func() {
+					Expect(err).To(MatchError("Configuration error: server.node_index out of range"))
+				})
+			})
+
 		})
 
 	})

@@ -1,9 +1,12 @@
 package sqldb_test
 
 import (
+	"autoscaler/db"
 	. "autoscaler/db/sqldb"
+	"autoscaler/db/sqldb/fakes"
 	"autoscaler/models"
 
+	"code.cloudfoundry.org/clock/fakeclock"
 	"code.cloudfoundry.org/lager"
 	"github.com/lib/pq"
 	. "github.com/onsi/ginkgo"
@@ -11,12 +14,13 @@ import (
 
 	"encoding/json"
 	"os"
+	"time"
 )
 
 var _ = Describe("PolicySQLDB", func() {
 	var (
 		pdb            *PolicySQLDB
-		url            string
+		dbConfig       db.DatabaseConfig
 		logger         lager.Logger
 		err            error
 		appIds         map[string]bool
@@ -29,12 +33,17 @@ var _ = Describe("PolicySQLDB", func() {
 
 	BeforeEach(func() {
 		logger = lager.NewLogger("policy-sqldb-test")
-		url = os.Getenv("DBURL")
+		dbConfig = db.DatabaseConfig{
+			URL:                   os.Getenv("DBURL"),
+			MaxOpenConnections:    10,
+			MaxIdleConnections:    5,
+			ConnectionMaxLifetime: 10 * time.Second,
+		}
 	})
 
 	Describe("NewPolicySQLDB", func() {
 		JustBeforeEach(func() {
-			pdb, err = NewPolicySQLDB(url, logger)
+			pdb, err = NewPolicySQLDB(dbConfig, logger)
 		})
 
 		AfterEach(func() {
@@ -46,7 +55,7 @@ var _ = Describe("PolicySQLDB", func() {
 
 		Context("when db url is not correct", func() {
 			BeforeEach(func() {
-				url = "postgres://not-exist-user:not-exist-password@localhost/autoscaler?sslmode=disable"
+				dbConfig.URL = "postgres://not-exist-user:not-exist-password@localhost/autoscaler?sslmode=disable"
 			})
 			It("should error", func() {
 				Expect(err).To(BeAssignableToTypeOf(&pq.Error{}))
@@ -64,7 +73,7 @@ var _ = Describe("PolicySQLDB", func() {
 
 	Describe("GetAppIds", func() {
 		BeforeEach(func() {
-			pdb, err = NewPolicySQLDB(url, logger)
+			pdb, err = NewPolicySQLDB(dbConfig, logger)
 			Expect(err).NotTo(HaveOccurred())
 
 			cleanPolicyTable()
@@ -105,7 +114,7 @@ var _ = Describe("PolicySQLDB", func() {
 
 	Describe("GetAppPolicy", func() {
 		BeforeEach(func() {
-			pdb, err = NewPolicySQLDB(url, logger)
+			pdb, err = NewPolicySQLDB(dbConfig, logger)
 			Expect(err).NotTo(HaveOccurred())
 
 			cleanPolicyTable()
@@ -115,7 +124,6 @@ var _ = Describe("PolicySQLDB", func() {
 				InstanceMax: 6,
 				ScalingRules: []*models.ScalingRule{{
 					MetricType:            testMetricName,
-					StatWindowSeconds:     120,
 					BreachDurationSeconds: 180,
 					Threshold:             1048576000,
 					Operator:              ">",
@@ -126,7 +134,6 @@ var _ = Describe("PolicySQLDB", func() {
 				InstanceMax: 8,
 				ScalingRules: []*models.ScalingRule{{
 					MetricType:            testMetricName,
-					StatWindowSeconds:     120,
 					BreachDurationSeconds: 300,
 					Threshold:             104857600,
 					Operator:              "<",
@@ -155,7 +162,6 @@ var _ = Describe("PolicySQLDB", func() {
 					InstanceMax: 6,
 					ScalingRules: []*models.ScalingRule{{
 						MetricType:            testMetricName,
-						StatWindowSeconds:     120,
 						BreachDurationSeconds: 180,
 						Threshold:             1048576000,
 						Operator:              ">",
@@ -179,7 +185,7 @@ var _ = Describe("PolicySQLDB", func() {
 
 	Describe("RetrievePolicies", func() {
 		BeforeEach(func() {
-			pdb, err = NewPolicySQLDB(url, logger)
+			pdb, err = NewPolicySQLDB(dbConfig, logger)
 			Expect(err).NotTo(HaveOccurred())
 
 			cleanPolicyTable()
@@ -198,7 +204,7 @@ var _ = Describe("PolicySQLDB", func() {
 			policies, err = pdb.RetrievePolicies()
 		})
 
-		Context("when retriving all the policies)", func() {
+		Context("when retriving all the policies", func() {
 			It("returns all the policies", func() {
 				Expect(err).NotTo(HaveOccurred())
 
@@ -222,4 +228,83 @@ var _ = Describe("PolicySQLDB", func() {
 			})
 		})
 	})
+
+	Describe("EmitHealthMetrics", func() {
+		var interval time.Duration
+		var clock *fakeclock.FakeClock
+		var health *fakes.FakeHealth
+
+		BeforeEach(func() {
+			pdb, err = NewPolicySQLDB(dbConfig, logger)
+			Expect(err).NotTo(HaveOccurred())
+			cleanPolicyTable()
+
+			health = &fakes.FakeHealth{}
+			interval = 2 * time.Second
+			clock = fakeclock.NewFakeClock(time.Now())
+			pdb.EmitHealthMetrics(health, clock, interval)
+			Eventually(clock.WatcherCount).Should(Equal(1))
+		})
+
+		AfterEach(func() {
+			err = pdb.Close()
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("will call out to set health data", func() {
+			clock.Increment(1 * interval)
+			Eventually(func() int {
+				return health.SetCallCount()
+			}).Should(Equal(1))
+		})
+
+	})
+
+	Describe("DeletePolicy", func() {
+		BeforeEach(func() {
+			pdb, err = NewPolicySQLDB(dbConfig, logger)
+			Expect(err).NotTo(HaveOccurred())
+
+			cleanPolicyTable()
+		})
+
+		AfterEach(func() {
+			err = pdb.Close()
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		JustBeforeEach(func() {
+			err = pdb.DeletePolicy("an-app-id")
+		})
+
+		Context("when there is no policy in the table", func() {
+			It("should not error", func() {
+				Expect(err).NotTo(HaveOccurred())
+			})
+		})
+
+		Context("when policy table is not empty", func() {
+			BeforeEach(func() {
+				scalingPolicy = &models.ScalingPolicy{InstanceMax: 1, InstanceMin: 6}
+				insertPolicy("an-app-id", scalingPolicy)
+			})
+
+			It("should delete the policy", func() {
+				Expect(err).NotTo(HaveOccurred())
+				policy, err := pdb.GetAppPolicy("an-app-id")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(policy).To(BeNil())
+			})
+		})
+
+		Context("when there is database error", func() {
+			BeforeEach(func() {
+				pdb.Close()
+			})
+			It("should error", func() {
+				Expect(err).To(HaveOccurred())
+			})
+		})
+	})
+
 })

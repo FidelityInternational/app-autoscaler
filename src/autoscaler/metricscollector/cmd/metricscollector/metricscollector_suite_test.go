@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"code.cloudfoundry.org/cfhttp"
-	"code.cloudfoundry.org/consuladapter/consulrunner"
 	"github.com/cloudfoundry/sonde-go/events"
 	"github.com/gogo/protobuf/proto"
 	. "github.com/onsi/ginkgo"
@@ -29,8 +28,6 @@ import (
 	"autoscaler/db"
 	"autoscaler/metricscollector/config"
 	"autoscaler/metricscollector/testhelpers"
-
-	"code.cloudfoundry.org/locket"
 )
 
 var (
@@ -43,7 +40,6 @@ var (
 	isTokenExpired bool
 	eLock          *sync.Mutex
 	httpClient     *http.Client
-	consulRunner   *consulrunner.ClusterRunner
 )
 
 func TestMetricsCollector(t *testing.T) {
@@ -126,18 +122,8 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	wsHandler := testhelpers.NewWebsocketHandler(messagesToSend, 100*time.Millisecond)
 	ccNOAAUAA.RouteToHandler("GET", "/apps/an-app-id/stream", wsHandler.ServeWebsocket)
 
-	consulRunner = consulrunner.NewClusterRunner(
-		consulrunner.ClusterRunnerConfig{
-			StartingPort: 9001 + GinkgoParallelNode()*consulrunner.PortOffsetLength,
-			NumNodes:     1,
-			Scheme:       "http",
-		},
-	)
-	consulRunner.Start()
-	consulRunner.WaitUntilReady()
-
-	cfg.Cf = cf.CfConfig{
-		Api:       ccNOAAUAA.URL(),
+	cfg.CF = cf.CFConfig{
+		API:       ccNOAAUAA.URL(),
 		GrantType: cf.GrantTypePassword,
 		Username:  "admin",
 		Password:  "admin",
@@ -149,19 +135,28 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 	cfg.Server.TLS.KeyFile = filepath.Join(testCertDir, "metricscollector.key")
 	cfg.Server.TLS.CertFile = filepath.Join(testCertDir, "metricscollector.crt")
 	cfg.Server.TLS.CACertFile = filepath.Join(testCertDir, "autoscaler-ca.crt")
+	cfg.Server.NodeAddrs = []string{"localhost"}
+	cfg.Server.NodeIndex = 0
 
-	cfg.Logging.Level = "debug"
+	cfg.Logging.Level = "info"
 
-	cfg.Db.InstanceMetricsDbUrl = os.Getenv("DBURL")
-	cfg.Db.PolicyDbUrl = os.Getenv("DBURL")
+	cfg.DB.InstanceMetricsDB = db.DatabaseConfig{
+		URL:                   os.Getenv("DBURL"),
+		MaxOpenConnections:    10,
+		MaxIdleConnections:    5,
+		ConnectionMaxLifetime: 10 * time.Second,
+	}
+	cfg.DB.PolicyDB = db.DatabaseConfig{
+		URL:                   os.Getenv("DBURL"),
+		MaxOpenConnections:    10,
+		MaxIdleConnections:    5,
+		ConnectionMaxLifetime: 10 * time.Second,
+	}
 
 	cfg.Collector.CollectInterval = 10 * time.Second
 	cfg.Collector.RefreshInterval = 30 * time.Second
 	cfg.Collector.CollectMethod = config.CollectMethodPolling
-
-	cfg.Lock.ConsulClusterConfig = consulRunner.ConsulCluster()
-	cfg.Lock.LockRetryInterval = locket.RetryInterval
-	cfg.Lock.LockTTL = locket.DefaultSessionTTL
+	cfg.Collector.SaveInterval = 5 * time.Second
 
 	configFile = writeConfig(&cfg)
 
@@ -178,9 +173,6 @@ var _ = SynchronizedBeforeSuite(func() []byte {
 })
 
 var _ = SynchronizedAfterSuite(func() {
-	if consulRunner != nil {
-		consulRunner.Stop()
-	}
 	ccNOAAUAA.Close()
 	os.Remove(configFile.Name())
 }, func() {
@@ -202,17 +194,15 @@ func writeConfig(c *config.Config) *os.File {
 }
 
 type MetricsCollectorRunner struct {
-	configPath        string
-	startCheck        string
-	acquiredLockCheck string
-	Session           *gexec.Session
+	configPath string
+	startCheck string
+	Session    *gexec.Session
 }
 
 func NewMetricsCollectorRunner() *MetricsCollectorRunner {
 	return &MetricsCollectorRunner{
-		configPath:        configFile.Name(),
-		startCheck:        "metricscollector.started",
-		acquiredLockCheck: "metricscollector.lock.acquire-lock-succeeded",
+		configPath: configFile.Name(),
+		startCheck: "metricscollector.started",
 	}
 }
 

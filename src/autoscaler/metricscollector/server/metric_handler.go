@@ -14,17 +14,16 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 )
 
 type MetricHandler struct {
-	cfClient     cf.CfClient
+	cfClient     cf.CFClient
 	logger       lager.Logger
 	noaaConsumer noaa.NoaaConsumer
 	database     db.InstanceMetricsDB
 }
 
-func NewMetricHandler(logger lager.Logger, cfc cf.CfClient, consumer noaa.NoaaConsumer, database db.InstanceMetricsDB) *MetricHandler {
+func NewMetricHandler(logger lager.Logger, cfc cf.CFClient, consumer noaa.NoaaConsumer, database db.InstanceMetricsDB) *MetricHandler {
 	return &MetricHandler{
 		cfClient:     cfc,
 		noaaConsumer: consumer,
@@ -33,50 +32,45 @@ func NewMetricHandler(logger lager.Logger, cfc cf.CfClient, consumer noaa.NoaaCo
 	}
 }
 
-func (h *MetricHandler) GetMemoryMetric(w http.ResponseWriter, r *http.Request, vars map[string]string) {
-	appId := vars["appid"]
-
-	w.Header().Set("Content-Type", "application/json")
-
-	containerEnvelopes, err := h.noaaConsumer.ContainerEnvelopes(appId, cf.TokenTypeBearer+" "+h.cfClient.GetTokens().AccessToken)
-	if err != nil {
-		h.logger.Error("Get-memory-metric-from-noaa", err, lager.Data{"appId": appId})
-
-		handlers.WriteJSONResponse(w, http.StatusInternalServerError, models.ErrorResponse{
-			Code:    "Interal-Server-Error",
-			Message: "Error getting memory metrics from doppler"})
-		return
-	}
-	h.logger.Debug("Get-memory-metrics-from-noaa", lager.Data{"appId": appId, "containerEnvelopes": containerEnvelopes})
-
-	metrics := noaa.GetInstanceMemoryMetricsFromContainerEnvelopes(time.Now().UnixNano(), appId, containerEnvelopes)
-	var body []byte
-	body, err = json.Marshal(metrics)
-	if err != nil {
-		h.logger.Error("get-memory-metrics-marshal", err, lager.Data{"appId": appId, "metrics": metrics})
-
-		handlers.WriteJSONResponse(w, http.StatusInternalServerError, models.ErrorResponse{
-			Code:    "Interal-Server-Error",
-			Message: "Error getting memory metrics from doppler"})
-		return
-	}
-
-	w.Write(body)
-}
-
 func (h *MetricHandler) GetMetricHistories(w http.ResponseWriter, r *http.Request, vars map[string]string) {
 	appId := vars["appid"]
 	metricType := vars["metrictype"]
+	instanceIndexParam := r.URL.Query()["instanceindex"]
 	startParam := r.URL.Query()["start"]
 	endParam := r.URL.Query()["end"]
 	orderParam := r.URL.Query()["order"]
 
-	h.logger.Debug("get-metric-histories", lager.Data{"appId": appId, "metrictype": metricType, "start": startParam, "end": endParam, "order": orderParam})
+	h.logger.Debug("get-metric-histories", lager.Data{"appId": appId, "metrictype": metricType, "instanceIndex": instanceIndexParam, "start": startParam, "end": endParam, "order": orderParam})
 
 	var err error
 	start := int64(0)
 	end := int64(-1)
 	order := db.ASC
+	instanceIndex := int64(-1)
+
+	if len(instanceIndexParam) == 1 {
+		instanceIndex, err = strconv.ParseInt(instanceIndexParam[0], 10, 64)
+		if err != nil {
+			h.logger.Error("get-metric-histories-parse-instance-index", err, lager.Data{"instanceIndex": instanceIndexParam})
+			handlers.WriteJSONResponse(w, http.StatusBadRequest, models.ErrorResponse{
+				Code:    "Bad-Request",
+				Message: "Error parsing instanceIndex"})
+			return
+		}
+		if instanceIndex < 0 {
+			h.logger.Error("get-metric-histories-parse-instance-index", err, lager.Data{"instanceIndex": instanceIndexParam})
+			handlers.WriteJSONResponse(w, http.StatusBadRequest, models.ErrorResponse{
+				Code:    "Bad-Request",
+				Message: "InstanceIndex must be greater than or equal to 0"})
+			return
+		}
+	} else if len(instanceIndexParam) > 1 {
+		h.logger.Error("get-metric-histories-get-instance-index", err, lager.Data{"instanceIndex": instanceIndexParam})
+		handlers.WriteJSONResponse(w, http.StatusBadRequest, models.ErrorResponse{
+			Code:    "Bad-Request",
+			Message: "Incorrect instanceIndex parameter in query string"})
+		return
+	}
 
 	if len(startParam) == 1 {
 		start, err = strconv.ParseInt(startParam[0], 10, 64)
@@ -122,7 +116,7 @@ func (h *MetricHandler) GetMetricHistories(w http.ResponseWriter, r *http.Reques
 			h.logger.Error("get-metric-histories-parse-order", err, lager.Data{"order": orderParam})
 			handlers.WriteJSONResponse(w, http.StatusBadRequest, models.ErrorResponse{
 				Code:    "Bad-Request",
-				Message: fmt.Sprintf("Incorrect order parameter in query string, the value can only be %s or %s", db.ASC, db.DESC),
+				Message: fmt.Sprintf("Incorrect order parameter in query string, the value can only be %s or %s", db.ASCSTR, db.DESCSTR),
 			})
 			return
 		}
@@ -136,9 +130,9 @@ func (h *MetricHandler) GetMetricHistories(w http.ResponseWriter, r *http.Reques
 
 	var mtrcs []*models.AppInstanceMetric
 
-	mtrcs, err = h.database.RetrieveInstanceMetrics(appId, metricType, start, end, order)
+	mtrcs, err = h.database.RetrieveInstanceMetrics(appId, int(instanceIndex), metricType, start, end, order)
 	if err != nil {
-		h.logger.Error("get-metric-histories-retrieve-metrics", err, lager.Data{"appId": appId, "metrictype": metricType, "start": start, "end": end, "order": order})
+		h.logger.Error("get-metric-histories-retrieve-metrics", err, lager.Data{"appId": appId, "metrictype": metricType, "instanceIndex": instanceIndex, "start": start, "end": end, "order": order})
 		handlers.WriteJSONResponse(w, http.StatusInternalServerError, models.ErrorResponse{
 			Code:    "Interal-Server-Error",
 			Message: "Error getting metric histories from database"})

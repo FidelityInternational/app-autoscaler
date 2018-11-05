@@ -11,9 +11,11 @@ var settings;
 describe('config setting Test Suite', function() {
   beforeEach(function() {
     defaultConfig = {
-      "port": 80,
+      "port": 88,
+      "publicPort": 80,
       "username": "username",
       "password": "password",
+      "enableCustomMetrics": true,
       "db": {
         "maxConnections": 10,
         "minConnections": 0,
@@ -29,21 +31,32 @@ describe('config setting Test Suite', function() {
           }
       },
       "httpRequestTimeout": 5000,
-      "tls": {
+      "publicTls": {
         "keyFile": "keyFilePath",
         "certFile": "certFilePath",
         "caCertFile": "caCertFilePath"
       },
+      "tls": {
+        "keyFile": "keyFilePath_internal",
+        "certFile": "certFilePath_internal",
+        "caCertFile": "caCertFilePath"
+      },
       "serviceCatalogPath" : "catalogPath",
-      "dashboardRedirectUri": "https://dashboard-redirect-uri-settings.example.com"
+      "schemaValidationPath" : "schemaPath",
+      "dashboardRedirectUri": "https://dashboard-redirect-uri-settings.example.com",
+      "customMetricsUrl": "http://metrics.example.com/v1/metrics"
     };
     settings = configSetting(defaultConfig);
   });
 
   it('Should contain the default configuration', function() {
     expect(settings.port).to.equal(defaultConfig.port);
+    expect(settings.publicPort).to.equal(defaultConfig.publicPort);
+
     expect(settings.username).to.equal(defaultConfig.username);
     expect(settings.password).to.equal(defaultConfig.password);
+    expect(settings.enableCustomMetrics).to.equal(true);
+
     expect(settings.db.uri).to.equal(defaultConfig.db.uri);
     expect(settings.db.server).to.equal('postgres://postgres@server:80');
     expect(settings.db.name).to.equal('dbname');
@@ -51,15 +64,24 @@ describe('config setting Test Suite', function() {
     expect(settings.db.minConnections).to.equal(defaultConfig.db.minConnections);
     expect(settings.db.idleTimeout).to.equal(defaultConfig.db.idleTimeout);
     expect(settings.httpRequestTimeout).to.equal(defaultConfig.httpRequestTimeout);
+
     expect(settings.tls.keyFile).to.equal(defaultConfig.tls.keyFile);
     expect(settings.tls.certFile).to.equal(defaultConfig.tls.certFile);
     expect(settings.tls.caCertFile).to.equal(defaultConfig.tls.caCertFile);
+
+    expect(settings.publicTls.keyFile).to.equal(defaultConfig.publicTls.keyFile);
+    expect(settings.publicTls.certFile).to.equal(defaultConfig.publicTls.certFile);
+    expect(settings.publicTls.caCertFile).to.equal(defaultConfig.publicTls.caCertFile);
+
     expect(settings.apiserver.uri).to.equal(defaultConfig.apiserver.uri);
     expect(settings.apiserver.tls.keyFile).to.equal(defaultConfig.apiserver.tls.keyFile);
     expect(settings.apiserver.tls.caCertFile).to.equal(defaultConfig.apiserver.tls.caCertFile);
     expect(settings.apiserver.tls.certFile).to.equal(defaultConfig.apiserver.tls.certFile);
+
     expect(settings.serviceCatalogPath).to.equal(defaultConfig.serviceCatalogPath);
+    expect(settings.schemaValidationPath).to.equal(defaultConfig.schemaValidationPath);
     expect(settings.dashboardRedirectUri).to.equal(defaultConfig.dashboardRedirectUri);
+    expect(settings.customMetricsUrl).to.equal(defaultConfig.customMetricsUrl);
   });
 
   describe('validate', function() {
@@ -96,6 +118,37 @@ describe('config setting Test Suite', function() {
           settings.port = 70000;
           expect(settings.validate().valid).to.equal(false);
           expect(settings.validate().message).to.equal("value of port must between 1 and 65535");
+        })
+      });
+    });
+
+    context('Validate publicPort', function() {
+      context('When publicPort is null', function() {
+        it('Should return false', function() {
+          settings.publicPort = null;
+          expect(settings.validate().valid).to.equal(false);
+          expect(settings.validate().message).to.equal("publicPort is required");
+        })
+      });
+      context('When publicPort is undefined', function() {
+        it('Should return false', function() {
+          delete settings.publicPort;
+          expect(settings.validate().valid).to.equal(false);
+          expect(settings.validate().message).to.equal("publicPort is required");
+        })
+      });
+      context('When publicPort is not an integer', function() {
+        it('Should return false', function() {
+          settings.publicPort = "80";
+          expect(settings.validate().valid).to.equal(false);
+          expect(settings.validate().message).to.equal("publicPort must be a number");
+        })
+      });
+      context('When the publicPort is out of range', function() {
+        it('Should return false', function() {
+          settings.publicPort = 70000;
+          expect(settings.validate().valid).to.equal(false);
+          expect(settings.validate().message).to.equal("value of publicPort must between 1 and 65535");
         })
       });
     });
@@ -144,6 +197,29 @@ describe('config setting Test Suite', function() {
           settings.password = 12345
           expect(settings.validate().valid).to.equal(false);
           expect(settings.validate().message).to.equal("password must be a string");
+        })
+      });
+    });
+    context('Validate enableCustomMetrics', function() {
+      context('When enableCustomMetrics is null', function() {
+        it('Should return false', function() {
+          settings.enableCustomMetrics = null;
+          expect(settings.validate().valid).to.equal(false);
+          expect(settings.validate().message).to.equal("enableCustomMetrics is required");
+        })
+      });
+      context('When enableCustomMetrics is undefined', function() {
+        it('Should return false', function() {
+          delete settings.enableCustomMetrics;
+          expect(settings.validate().valid).to.equal(false);
+          expect(settings.validate().message).to.equal("enableCustomMetrics is required");
+        })
+      });
+      context('When enableCustomMetrics is not a boolean', function() {
+        it('Should return false', function() {
+          settings.enableCustomMetrics = 1234;
+          expect(settings.validate().valid).to.equal(false);
+          expect(settings.validate().message).to.equal("enableCustomMetrics must be a boolean");
         })
       });
     });
@@ -437,6 +513,100 @@ describe('config setting Test Suite', function() {
     });
   });
 
+  context('Validate publicTls', function(){
+    context('When publicTls is null', function(){
+      it('Should return true',function(){
+        settings.publicTls = null;
+        expect(settings.validate().valid).to.equal(true);
+      });
+    });
+    context('When publicTls is undefined', function(){
+      it('Should return true',function(){
+        delete settings.publicTls;
+        expect(settings.validate().valid).to.equal(true);
+      });
+    });
+    context('When publicTls is not an object', function(){
+      it('Should return false',function(){
+        settings.publicTls = "notobject";
+        expect(settings.validate().valid).to.equal(false);
+        expect(settings.validate().message).to.equal("publicTls must be an object");
+      });
+    });
+  });
+
+  context('Validate publicTls.keyFile', function(){
+    context('When publicTls.keyFile is null', function(){
+      it('Should return false',function(){
+        settings.publicTls.keyFile = null;
+        expect(settings.validate().valid).to.equal(false);
+        expect(settings.validate().message).to.equal("publicTls.keyFile is required");
+      });
+    });
+    context('When publicTls.keyFile is undefined', function(){
+      it('Should return false',function(){
+        delete settings.publicTls.keyFile;
+        expect(settings.validate().valid).to.equal(false);
+        expect(settings.validate().message).to.equal("publicTls.keyFile is required");
+      });
+    });
+    context('When publicTls.keyFile is not a string', function(){
+      it('Should return false',function(){
+        settings.publicTls.keyFile = 1234;
+        expect(settings.validate().valid).to.equal(false);
+        expect(settings.validate().message).to.equal("publicTls.keyFile must be a string");
+      });
+    });
+  });
+
+  context('Validate publicTls.certFile', function(){
+    context('When publicTls.certFile is null', function(){
+      it('Should return false',function(){
+        settings.publicTls.certFile = null;
+        expect(settings.validate().valid).to.equal(false);
+        expect(settings.validate().message).to.equal("publicTls.certFile is required");
+      });
+    });
+    context('When publicTls.certFile is undefined', function(){
+      it('Should return false',function(){
+        delete settings.publicTls.certFile;
+        expect(settings.validate().valid).to.equal(false);
+        expect(settings.validate().message).to.equal("publicTls.certFile is required");
+      });
+    });
+    context('When publicTls.certFile is not a string', function(){
+      it('Should return false',function(){
+        settings.publicTls.certFile = 1234;
+        expect(settings.validate().valid).to.equal(false);
+        expect(settings.validate().message).to.equal("publicTls.certFile must be a string");
+      });
+    });
+  });
+
+  context('Validate publicTls.caCertFile', function(){
+    context('When publicTls.caCertFile is null', function(){
+      it('Should return false',function(){
+        settings.publicTls.caCertFile = null;
+        expect(settings.validate().valid).to.equal(false);
+        expect(settings.validate().message).to.equal("publicTls.caCertFile is required");
+      });
+    });
+    context('When publicTls.caCertFile is undefined', function(){
+      it('Should return false',function(){
+        delete settings.publicTls.caCertFile;
+        expect(settings.validate().valid).to.equal(false);
+        expect(settings.validate().message).to.equal("publicTls.caCertFile is required");
+      });
+    });
+    context('When publicTls.caCertFile is not a string', function(){
+      it('Should return false',function(){
+        settings.publicTls.caCertFile = 1234;
+        expect(settings.validate().valid).to.equal(false);
+        expect(settings.validate().message).to.equal("publicTls.caCertFile must be a string");
+      });
+    });
+  });
+
 context('Validate apiserver client tls.keyFile', function(){
     context('When apiserver client tls.keyFile is null', function(){
       it('Should return false',function(){
@@ -573,6 +743,28 @@ context('Validate Service Catalog', function(){
         settings.dashboardRedirectUri = 1234;
         expect(settings.validate().valid).to.equal(false);
         expect(settings.validate().message).to.equal("dashboardRedirectUri must be a string");
+      });
+    });
+  });
+
+  context('Validate Custom Metrics Forwarder Uri', function(){
+    context('When customMetricsUrl is null', function(){
+      it('Should return true',function(){
+        settings.customMetricsUrl = null;
+        expect(settings.validate().valid).to.equal(true);
+      });
+    });
+    context('When customMetricsUrl is undefined', function(){
+      it('Should return true',function(){
+        delete settings.customMetricsUrl;
+        expect(settings.validate().valid).to.equal(true);
+      });
+    });
+    context('When customMetricsUrl is not a string', function(){
+      it('Should return false',function(){
+        settings.customMetricsUrl = 1234;
+        expect(settings.validate().valid).to.equal(false);
+        expect(settings.validate().message).to.equal("customMetricsUrl must be a string");
       });
     });
   });

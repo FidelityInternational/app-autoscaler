@@ -21,7 +21,6 @@ import static org.springframework.test.web.client.match.MockRestRequestMatchers.
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withNoContent;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -44,7 +43,6 @@ import org.cloudfoundry.autoscaler.scheduler.rest.model.ApplicationSchedules;
 import org.cloudfoundry.autoscaler.scheduler.rest.model.Schedules;
 import org.cloudfoundry.autoscaler.scheduler.rest.model.SynchronizeResult;
 import org.cloudfoundry.autoscaler.scheduler.util.ApplicationPolicyBuilder;
-import org.cloudfoundry.autoscaler.scheduler.util.ConsulUtil;
 import org.cloudfoundry.autoscaler.scheduler.util.PolicyJsonEntityBuilder;
 import org.cloudfoundry.autoscaler.scheduler.util.RecurringScheduleEntitiesBuilder;
 import org.cloudfoundry.autoscaler.scheduler.util.ScheduleBuilder;
@@ -57,9 +55,7 @@ import org.cloudfoundry.autoscaler.scheduler.util.error.MessageBundleResourceHel
 import org.cloudfoundry.autoscaler.scheduler.util.error.SchedulerInternalException;
 import org.cloudfoundry.autoscaler.scheduler.util.error.ValidationErrorResult;
 import org.hamcrest.core.Is;
-import org.junit.AfterClass;
 import org.junit.Before;
-import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
@@ -127,19 +123,6 @@ public class ScheduleManagerTest {
 
 	@Captor
 	private ArgumentCaptor<LogEvent> logCaptor;
-
-	private static ConsulUtil consulUtil;
-
-	@BeforeClass
-	public static void beforeClass() throws IOException {
-		consulUtil = new ConsulUtil();
-		consulUtil.start();
-	}
-
-	@AfterClass
-	public static void afterClass() throws IOException, InterruptedException {
-		consulUtil.stop();
-	}
 
 	@Before
 	public void before() throws SchedulerException {
@@ -758,7 +741,7 @@ public class ScheduleManagerTest {
 	}
 
 	@Test
-	public void testSynchronizeSchedules_with_both_policy_and_schedules_existed_and_guid_are_different() throws JsonProcessingException {
+	public void testSynchronizeSchedules_with_both_policy_with_schedules_and_schedules_existed_and_guid_are_different() throws JsonProcessingException {
 		String appId = TestDataSetupHelper.generateAppIds(1)[0];
 		String guid = TestDataSetupHelper.generateGuid();
 		String anotherGuid = TestDataSetupHelper.generateGuid();
@@ -799,6 +782,42 @@ public class ScheduleManagerTest {
 		this.assertCreateSchedules(anotherSchedules, anotherSchedules.getSpecificDate().get(0),
 				anotherSchedules.getRecurringSchedule().get(0), noOfSpecificDateSchedules, noOfDOMRecurringSchedules,
 				noOfDOWRecurringSchedules);
+	}
+	
+	@Test
+	public void testSynchronizeSchedules_with_both_policy_without_schedule_and_schedules_existed() throws JsonProcessingException {
+		String appId = TestDataSetupHelper.generateAppIds(1)[0];
+		String guid = TestDataSetupHelper.generateGuid();
+		String anotherGuid = TestDataSetupHelper.generateGuid();
+		int noOfSpecificDateSchedules = 3;
+		int noOfDOMRecurringSchedules = 3;
+		int noOfDOWRecurringSchedules = 3;
+		
+		List<RecurringScheduleEntity> recurringEntities = new RecurringScheduleEntitiesBuilder(noOfDOMRecurringSchedules, noOfDOWRecurringSchedules).setAppId(appId).setGuid(guid).setTimeZone("timeZone").setDefaultInstanceMinCount(1).setDefaultInstanceMaxCount(5).setScheduleId().build();
+		List<SpecificDateScheduleEntity> specificDateEntities = new SpecificDateScheduleEntitiesBuilder(noOfSpecificDateSchedules).setAppid(appId).setGuid(guid).setTimeZone("timeZone").setDefaultInstanceMinCount(1).setDefaultInstanceMaxCount(5).setScheduleId().build();
+		Schedules schedules = new ScheduleBuilder().setSpecificDate(specificDateEntities).setRecurringSchedule(recurringEntities).setTimeZone("tomeZone").build();
+		
+		ApplicationSchedules anotherApplicationSchedule = new ApplicationPolicyBuilder(1,5).setSchedules(null).build();
+		
+		String[] appIdAndGuid = {appId, guid};
+
+		List<PolicyJsonEntity> policyJsonList = new ArrayList<PolicyJsonEntity>() {
+			{
+				add(new PolicyJsonEntityBuilder(appId, anotherGuid, anotherApplicationSchedule).build());
+			}
+		};
+		when(policyJsonDao.getAllPolicies()).thenReturn(policyJsonList);
+		when(specificDateScheduleDao.getDistinctAppIdAndGuidList()).thenReturn(new ArrayList(){{add(appIdAndGuid);}});
+		when(recurringScheduleDao.getDistinctAppIdAndGuidList()).thenReturn(new ArrayList(){{add(appIdAndGuid);}});
+		when(specificDateScheduleDao.findAllSpecificDateSchedulesByAppId(appId))
+				.thenReturn(schedules.getSpecificDate());
+		when(recurringScheduleDao.findAllRecurringSchedulesByAppId(appId)).thenReturn(schedules.getRecurringSchedule());
+
+		SynchronizeResult result = scheduleManager.synchronizeSchedules();
+		
+		assertThat("It should update the shedules",result, is(new SynchronizeResult(0, 1, 0)));
+
+		this.assertDeleteSchedules(schedules);
 	}
 	
 	@Test

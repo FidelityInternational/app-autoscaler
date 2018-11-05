@@ -1,46 +1,54 @@
 package sqldb
 
 import (
-	"code.cloudfoundry.org/lager"
 	"database/sql"
 	"encoding/json"
+	"time"
+
+	"code.cloudfoundry.org/clock"
+	"code.cloudfoundry.org/lager"
 	_ "github.com/lib/pq"
 
 	"autoscaler/db"
+	"autoscaler/healthendpoint"
 	"autoscaler/models"
 )
 
 type PolicySQLDB struct {
-	url    string
-	logger lager.Logger
-	sqldb  *sql.DB
+	dbConfig db.DatabaseConfig
+	logger   lager.Logger
+	sqldb    *sql.DB
 }
 
-func NewPolicySQLDB(url string, logger lager.Logger) (*PolicySQLDB, error) {
-	sqldb, err := sql.Open(db.PostgresDriverName, url)
+func NewPolicySQLDB(dbConfig db.DatabaseConfig, logger lager.Logger) (*PolicySQLDB, error) {
+	sqldb, err := sql.Open(db.PostgresDriverName, dbConfig.URL)
 	if err != nil {
-		logger.Error("open-policy-db", err, lager.Data{"url": url})
+		logger.Error("open-policy-db", err, lager.Data{"dbConfig": dbConfig})
 		return nil, err
 	}
 
 	err = sqldb.Ping()
 	if err != nil {
 		sqldb.Close()
-		logger.Error("ping-policy-db", err, lager.Data{"url": url})
+		logger.Error("ping-policy-db", err, lager.Data{"dbConfig": dbConfig})
 		return nil, err
 	}
 
+	sqldb.SetConnMaxLifetime(dbConfig.ConnectionMaxLifetime)
+	sqldb.SetMaxIdleConns(dbConfig.MaxIdleConnections)
+	sqldb.SetMaxOpenConns(dbConfig.MaxOpenConnections)
+
 	return &PolicySQLDB{
-		url:    url,
-		logger: logger,
-		sqldb:  sqldb,
+		dbConfig: dbConfig,
+		logger:   logger,
+		sqldb:    sqldb,
 	}, nil
 }
 
 func (pdb *PolicySQLDB) Close() error {
 	err := pdb.sqldb.Close()
 	if err != nil {
-		pdb.logger.Error("Close-policy-db", err, lager.Data{"url": pdb.url})
+		pdb.logger.Error("Close-policy-db", err, lager.Data{"dbConfig": pdb.dbConfig})
 		return err
 	}
 	return nil
@@ -117,4 +125,23 @@ func (pdb *PolicySQLDB) GetAppPolicy(appId string) (*models.ScalingPolicy, error
 		return nil, err
 	}
 	return scalingPolicy, nil
+}
+
+func (pdb *PolicySQLDB) EmitHealthMetrics(h healthendpoint.Health, cclock clock.Clock, interval time.Duration) {
+	go func() {
+		ticker := cclock.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C() {
+			h.Set("openConnection_policyDB", float64(pdb.sqldb.Stats().OpenConnections))
+		}
+	}()
+}
+
+func (pdb *PolicySQLDB) DeletePolicy(appId string) error {
+	query := "DELETE FROM policy_json WHERE app_id = $1"
+	_, err := pdb.sqldb.Exec(query, appId)
+	if err != nil {
+		pdb.logger.Error("failed-to-delete-application-details", err, lager.Data{"query": query, "appId": appId})
+	}
+	return err
 }

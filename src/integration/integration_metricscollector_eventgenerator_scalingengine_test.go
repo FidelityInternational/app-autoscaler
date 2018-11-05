@@ -1,8 +1,6 @@
-package integration_test
+package integration
 
 import (
-	. "integration"
-
 	"autoscaler/cf"
 	"autoscaler/models"
 	"encoding/json"
@@ -10,7 +8,7 @@ import (
 	"time"
 
 	"autoscaler/metricscollector/config"
-	"code.cloudfoundry.org/locket"
+
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 )
@@ -19,7 +17,7 @@ var _ = Describe("Integration_Metricscollector_Eventgenerator_Scalingengine", fu
 
 	var (
 		testAppId         string
-		timeout           time.Duration = 20 * time.Second
+		timeout           time.Duration = 2 * time.Duration(breachDurationSecs) * time.Second
 		initInstanceCount int           = 2
 		collectMethod     string        = config.CollectMethodPolling
 	)
@@ -30,9 +28,9 @@ var _ = Describe("Integration_Metricscollector_Eventgenerator_Scalingengine", fu
 
 	JustBeforeEach(func() {
 		metricsCollectorConfPath = components.PrepareMetricsCollectorConfig(dbUrl, components.Ports[MetricsCollector], fakeCCNOAAUAA.URL(), cf.GrantTypePassword, collectInterval,
-			refreshInterval, collectMethod, tmpDir, locket.DefaultSessionTTL, locket.RetryInterval, consulRunner.ConsulCluster())
-		eventGeneratorConfPath = components.PrepareEventGeneratorConfig(dbUrl, fmt.Sprintf("https://127.0.0.1:%d", components.Ports[MetricsCollector]), fmt.Sprintf("https://127.0.0.1:%d", components.Ports[ScalingEngine]), aggregatorExecuteInterval, policyPollerInterval, evaluationManagerInterval, tmpDir, locket.DefaultSessionTTL, locket.RetryInterval, consulRunner.ConsulCluster())
-		scalingEngineConfPath = components.PrepareScalingEngineConfig(dbUrl, components.Ports[ScalingEngine], fakeCCNOAAUAA.URL(), cf.GrantTypePassword, tmpDir, consulRunner.ConsulCluster())
+			refreshInterval, saveInterval, collectMethod, tmpDir)
+		eventGeneratorConfPath = components.PrepareEventGeneratorConfig(dbUrl, components.Ports[EventGenerator], fmt.Sprintf("https://127.0.0.1:%d", components.Ports[MetricsCollector]), fmt.Sprintf("https://127.0.0.1:%d", components.Ports[ScalingEngine]), aggregatorExecuteInterval, policyPollerInterval, saveInterval, evaluationManagerInterval, tmpDir)
+		scalingEngineConfPath = components.PrepareScalingEngineConfig(dbUrl, components.Ports[ScalingEngine], fakeCCNOAAUAA.URL(), cf.GrantTypePassword, tmpDir)
 		startMetricsCollector()
 		startEventGenerator()
 		startScalingEngine()
@@ -42,6 +40,7 @@ var _ = Describe("Integration_Metricscollector_Eventgenerator_Scalingengine", fu
 	AfterEach(func() {
 		stopAll()
 	})
+
 	Describe("Scale out", func() {
 		Context("application's metrics break the scaling out rule for more than breach duration", func() {
 			BeforeEach(func() {
@@ -51,8 +50,7 @@ var _ = Describe("Integration_Metricscollector_Eventgenerator_Scalingengine", fu
 					ScalingRules: []*models.ScalingRule{
 						{
 							MetricType:            models.MetricNameMemoryUtil,
-							StatWindowSeconds:     10,
-							BreachDurationSeconds: 10,
+							BreachDurationSeconds: breachDurationSecs,
 							Threshold:             30,
 							Operator:              ">=",
 							CoolDownSeconds:       10,
@@ -100,8 +98,7 @@ var _ = Describe("Integration_Metricscollector_Eventgenerator_Scalingengine", fu
 					ScalingRules: []*models.ScalingRule{
 						{
 							MetricType:            models.MetricNameMemoryUtil,
-							StatWindowSeconds:     10,
-							BreachDurationSeconds: 10,
+							BreachDurationSeconds: breachDurationSecs,
 							Threshold:             80,
 							Operator:              ">=",
 							CoolDownSeconds:       10,
@@ -151,8 +148,7 @@ var _ = Describe("Integration_Metricscollector_Eventgenerator_Scalingengine", fu
 					ScalingRules: []*models.ScalingRule{
 						{
 							MetricType:            models.MetricNameMemoryUtil,
-							StatWindowSeconds:     10,
-							BreachDurationSeconds: 10,
+							BreachDurationSeconds: breachDurationSecs,
 							Threshold:             80,
 							Operator:              "<",
 							CoolDownSeconds:       10,
@@ -201,8 +197,7 @@ var _ = Describe("Integration_Metricscollector_Eventgenerator_Scalingengine", fu
 					ScalingRules: []*models.ScalingRule{
 						{
 							MetricType:            models.MetricNameMemoryUtil,
-							StatWindowSeconds:     10,
-							BreachDurationSeconds: 10,
+							BreachDurationSeconds: breachDurationSecs,
 							Threshold:             30,
 							Operator:              "<",
 							CoolDownSeconds:       30,
@@ -244,4 +239,5 @@ var _ = Describe("Integration_Metricscollector_Eventgenerator_Scalingengine", fu
 
 		})
 	})
+
 })

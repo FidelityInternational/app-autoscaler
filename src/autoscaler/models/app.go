@@ -2,12 +2,9 @@ package models
 
 import "time"
 
-type AppInfo struct {
-	Entity AppEntity `json:"entity"`
-}
-
 type AppEntity struct {
-	Instances int `json:"instances"`
+	Instances int     `json:"instances"`
+	State     *string `json:"state,omitempty"`
 }
 
 type ScalingType int
@@ -22,6 +19,11 @@ const (
 	ScalingStatusSucceeded ScalingStatus = iota
 	ScalingStatusFailed
 	ScalingStatusIgnored
+)
+
+const (
+	AppStatusStopped = "STOPPED"
+	AppStatusStarted = "STARTED"
 )
 
 type AppScalingHistory struct {
@@ -43,9 +45,16 @@ type AppMonitor struct {
 }
 
 type AppMetric struct {
-	AppId      string
-	MetricType string
-	Value      string
-	Unit       string
-	Timestamp  int64
+	AppId      string `json:"app_id"`
+	MetricType string `json:"name"`
+	Value      string `json:"value"`
+	Unit       string `json:"unit"`
+	Timestamp  int64  `json:"timestamp"`
+}
+
+type AppScalingResult struct {
+	AppId             string        `json:"app_id"`
+	Status            ScalingStatus `json:"status"`
+	Adjustment        int           `json:"adjustment"`
+	CooldownExpiredAt int64         `json:"cool_down_expired_at"`
 }

@@ -3,8 +3,11 @@ package sqldb_test
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"autoscaler/db"
 	"autoscaler/models"
@@ -34,9 +37,17 @@ var _ = BeforeSuite(func() {
 		Fail("can not connect database: " + e.Error())
 	}
 
+	e = createLockTable()
+	if e != nil {
+		Fail("can not create test lock table: " + e.Error())
+	}
 })
 
 var _ = AfterSuite(func() {
+	e := dropLockTable()
+	if e != nil {
+		Fail("can not drop test lock table: " + e.Error())
+	}
 	if dbHelper != nil {
 		dbHelper.Close()
 	}
@@ -97,9 +108,9 @@ func cleanAppMetricTable() {
 	}
 }
 
-func hasAppMetric(appId, metricType string, timestamp int64) bool {
-	query := "SELECT * FROM app_metric WHERE app_id = $1 AND metric_type = $2 AND timestamp = $3"
-	rows, e := dbHelper.Query(query, appId, metricType, timestamp)
+func hasAppMetric(appId, metricType string, timestamp int64, value string) bool {
+	query := "SELECT * FROM app_metric WHERE app_id = $1 AND metric_type = $2 AND timestamp = $3 AND value = $4"
+	rows, e := dbHelper.Query(query, appId, metricType, timestamp, value)
 	if e != nil {
 		Fail("can not query table app_metric: " + e.Error())
 	}
@@ -193,4 +204,82 @@ func insertSchedulerActiveSchedule(id int, appId string, startJobIdentifier int,
 		_, e = dbHelper.Exec(query, id, appId, startJobIdentifier, instanceMin, instanceMax, instanceMinInitial)
 	}
 	return e
+}
+
+func insertLockDetails(lock *models.Lock) (sql.Result, error) {
+	query := "INSERT INTO test_lock (owner,lock_timestamp,ttl) VALUES ($1,$2,$3)"
+	result, err := dbHelper.Exec(query, lock.Owner, lock.LastModifiedTimestamp, int64(lock.Ttl/time.Second))
+	return result, err
+}
+
+func cleanLockTable() error {
+	_, err := dbHelper.Exec("DELETE FROM test_lock")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func dropLockTable() error {
+	_, err := dbHelper.Exec("DROP TABLE test_lock")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func createLockTable() error {
+	_, err := dbHelper.Exec(`
+		CREATE TABLE IF NOT EXISTS test_lock (
+			owner VARCHAR(255) PRIMARY KEY,
+			lock_timestamp TIMESTAMP  NOT NULL,
+			ttl BIGINT DEFAULT 0
+		);
+	`)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateLockInDB(ownerid string, expectedLock *models.Lock) error {
+	var (
+		timestamp time.Time
+		ttl       time.Duration
+		owner     string
+	)
+	query := "SELECT owner,lock_timestamp,ttl FROM test_lock WHERE owner=$1"
+	row := dbHelper.QueryRow(query, ownerid)
+	err := row.Scan(&owner, &timestamp, &ttl)
+	if err != nil {
+		return err
+	}
+	errMsg := ""
+	if expectedLock.Owner != owner {
+		errMsg += fmt.Sprintf("mismatch owner (%s, %s),", expectedLock.Owner, owner)
+	}
+	if expectedLock.Ttl != time.Second*time.Duration(ttl) {
+		errMsg += fmt.Sprintf("mismatch ttl (%d, %d),", expectedLock.Ttl, time.Second*time.Duration(ttl))
+	}
+	if errMsg != "" {
+		return errors.New(errMsg)
+	}
+	return nil
+}
+
+func validateLockNotInDB(owner string) error {
+	var (
+		timestamp time.Time
+		ttl       time.Duration
+	)
+	query := "SELECT owner,lock_timestamp,ttl FROM test_lock WHERE owner=$1"
+	row := dbHelper.QueryRow(query, owner)
+	err := row.Scan(&owner, &timestamp, &ttl)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	return fmt.Errorf("lock exists with owner (%s)", owner)
 }

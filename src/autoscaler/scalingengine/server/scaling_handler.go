@@ -2,6 +2,7 @@ package server
 
 import (
 	"autoscaler/db"
+	"autoscaler/healthendpoint"
 	"autoscaler/models"
 	"autoscaler/scalingengine"
 
@@ -19,17 +20,22 @@ type ScalingHandler struct {
 	logger          lager.Logger
 	scalingEngineDB db.ScalingEngineDB
 	scalingEngine   scalingengine.ScalingEngine
+	health          healthendpoint.Health
 }
 
-func NewScalingHandler(logger lager.Logger, scalingEngineDB db.ScalingEngineDB, scalingEngine scalingengine.ScalingEngine) *ScalingHandler {
+func NewScalingHandler(logger lager.Logger, scalingEngineDB db.ScalingEngineDB, scalingEngine scalingengine.ScalingEngine, health healthendpoint.Health) *ScalingHandler {
 	return &ScalingHandler{
 		logger:          logger.Session("scaling-handler"),
 		scalingEngineDB: scalingEngineDB,
 		scalingEngine:   scalingEngine,
+		health:          health,
 	}
 }
 
 func (h *ScalingHandler) Scale(w http.ResponseWriter, r *http.Request, vars map[string]string) {
+	h.health.Inc("concurrentHTTPReq")
+	defer h.health.Dec("concurrentHTTPReq")
+
 	appId := vars["appid"]
 	logger := h.logger.Session("scale", lager.Data{"appId": appId})
 
@@ -45,9 +51,7 @@ func (h *ScalingHandler) Scale(w http.ResponseWriter, r *http.Request, vars map[
 
 	logger.Debug("handling", lager.Data{"trigger": trigger})
 
-	var newInstances int
-
-	newInstances, err = h.scalingEngine.Scale(appId, trigger)
+	result, err := h.scalingEngine.Scale(appId, trigger)
 
 	if err != nil {
 		logger.Error("failed-to-scale", err, lager.Data{"trigger": trigger})
@@ -57,22 +61,27 @@ func (h *ScalingHandler) Scale(w http.ResponseWriter, r *http.Request, vars map[
 		return
 	}
 
-	handlers.WriteJSONResponse(w, http.StatusOK, models.AppEntity{Instances: newInstances})
+	handlers.WriteJSONResponse(w, http.StatusOK, result)
 }
 
 func (h *ScalingHandler) GetScalingHistories(w http.ResponseWriter, r *http.Request, vars map[string]string) {
+	h.health.Inc("concurrentHTTPReq")
+	defer h.health.Dec("concurrentHTTPReq")
+
 	appId := vars["appid"]
 	logger := h.logger.Session("get-scaling-histories", lager.Data{"appId": appId})
 
 	startParam := r.URL.Query()["start"]
 	endParam := r.URL.Query()["end"]
 	orderParam := r.URL.Query()["order"]
+	includeParam := r.URL.Query()["include"]
 	logger.Debug("handling", lager.Data{"start": startParam, "end": endParam})
 
 	var err error
 	start := int64(0)
 	end := int64(-1)
 	order := db.DESC
+	includeAll := false
 
 	if len(startParam) == 1 {
 		start, err = strconv.ParseInt(startParam[0], 10, 64)
@@ -118,7 +127,7 @@ func (h *ScalingHandler) GetScalingHistories(w http.ResponseWriter, r *http.Requ
 			logger.Error("failed-to-get-order", err, lager.Data{"order": orderParam})
 			handlers.WriteJSONResponse(w, http.StatusBadRequest, models.ErrorResponse{
 				Code:    "Bad-Request",
-				Message: fmt.Sprintf("Incorrect order parameter in query string, the value can only be %s or %s", db.ASC, db.DESC),
+				Message: fmt.Sprintf("Incorrect order parameter in query string, the value can only be '%s' or '%s'", db.ASCSTR, db.DESCSTR),
 			})
 			return
 		}
@@ -129,11 +138,32 @@ func (h *ScalingHandler) GetScalingHistories(w http.ResponseWriter, r *http.Requ
 			Message: "Incorrect order parameter in query string"})
 		return
 	}
+
+	if len(includeParam) == 1 {
+		includeStr := strings.ToLower(includeParam[0])
+		if includeStr == "all" {
+			includeAll = true
+		} else {
+			logger.Error("failed-to-get-include-parameter", err, lager.Data{"include": includeParam})
+			handlers.WriteJSONResponse(w, http.StatusBadRequest, models.ErrorResponse{
+				Code:    "Bad-Request",
+				Message: fmt.Sprintf("Incorrect include parameter in query string, the value can only be 'all'"),
+			})
+			return
+		}
+	} else if len(includeParam) > 1 {
+		logger.Error("failed-to-get-include-parameter", err, lager.Data{"include": includeParam})
+		handlers.WriteJSONResponse(w, http.StatusBadRequest, models.ErrorResponse{
+			Code:    "Bad-Request",
+			Message: "Incorrect include parameter in query string"})
+		return
+	}
+
 	var histories []*models.AppScalingHistory
 
-	histories, err = h.scalingEngineDB.RetrieveScalingHistories(appId, start, end, order)
+	histories, err = h.scalingEngineDB.RetrieveScalingHistories(appId, start, end, order, includeAll)
 	if err != nil {
-		logger.Error("failed-to-retrieve-histories", err, lager.Data{"start": start, "end": end, "order": order})
+		logger.Error("failed-to-retrieve-histories", err, lager.Data{"start": start, "end": end, "order": order, "includeAll": includeAll})
 		handlers.WriteJSONResponse(w, http.StatusInternalServerError, models.ErrorResponse{
 			Code:    "Interal-Server-Error",
 			Message: "Error getting scaling histories from database"})
@@ -155,6 +185,9 @@ func (h *ScalingHandler) GetScalingHistories(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *ScalingHandler) StartActiveSchedule(w http.ResponseWriter, r *http.Request, vars map[string]string) {
+	h.health.Inc("concurrentHTTPReq")
+	defer h.health.Dec("concurrentHTTPReq")
+
 	appId := vars["appid"]
 	scheduleId := vars["scheduleid"]
 
@@ -185,6 +218,9 @@ func (h *ScalingHandler) StartActiveSchedule(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *ScalingHandler) RemoveActiveSchedule(w http.ResponseWriter, r *http.Request, vars map[string]string) {
+	h.health.Inc("concurrentHTTPReq")
+	defer h.health.Dec("concurrentHTTPReq")
+
 	appId := vars["appid"]
 	scheduleId := vars["scheduleid"]
 
@@ -214,6 +250,9 @@ func (h *ScalingHandler) RemoveActiveSchedule(w http.ResponseWriter, r *http.Req
 }
 
 func (h *ScalingHandler) GetActiveSchedule(w http.ResponseWriter, r *http.Request, vars map[string]string) {
+	h.health.Inc("concurrentHTTPReq")
+	defer h.health.Dec("concurrentHTTPReq")
+
 	appId := vars["appid"]
 
 	logger := h.logger.Session("get-active-schedule", lager.Data{"appid": appId})

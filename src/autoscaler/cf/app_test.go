@@ -20,30 +20,31 @@ import (
 var _ = Describe("App", func() {
 
 	var (
-		conf            *CfConfig
-		cfc             CfClient
+		conf            *CFConfig
+		cfc             CFClient
 		fakeCC          *ghttp.Server
 		fakeLoginServer *ghttp.Server
-		instances       int
 		err             error
+		appState        string
+		appEntity       *models.AppEntity
 	)
 
 	BeforeEach(func() {
 		fakeCC = ghttp.NewServer()
 		fakeLoginServer = ghttp.NewServer()
-		fakeCC.RouteToHandler("GET", PathCfInfo, ghttp.RespondWithJSONEncoded(http.StatusOK, Endpoints{
+		fakeCC.RouteToHandler("GET", PathCFInfo, ghttp.RespondWithJSONEncoded(http.StatusOK, Endpoints{
 			AuthEndpoint:    fakeLoginServer.URL(),
 			TokenEndpoint:   "test-token-endpoint",
 			DopplerEndpoint: "test-doppler-endpoint",
 		}))
-		fakeLoginServer.RouteToHandler("POST", PathCfAuth, ghttp.RespondWithJSONEncoded(http.StatusOK, Tokens{
+		fakeLoginServer.RouteToHandler("POST", PathCFAuth, ghttp.RespondWithJSONEncoded(http.StatusOK, Tokens{
 			AccessToken:  "test-access-token",
 			RefreshToken: "test-refresh-token",
 			ExpiresIn:    12000,
 		}))
-		conf = &CfConfig{}
-		conf.Api = fakeCC.URL()
-		cfc = NewCfClient(conf, lager.NewLogger("cf"), clock.NewClock())
+		conf = &CFConfig{}
+		conf.API = fakeCC.URL()
+		cfc = NewCFClient(conf, lager.NewLogger("cf"), clock.NewClock())
 		cfc.Login()
 	})
 
@@ -56,39 +57,83 @@ var _ = Describe("App", func() {
 		}
 	})
 
-	Describe("GetAppInstances", func() {
+	Describe("GetAppEntity", func() {
 		JustBeforeEach(func() {
-			instances, err = cfc.GetAppInstances("test-app-id")
+			appEntity, err = cfc.GetApp("test-app-id")
 		})
 		Context("when get app summary succeeds", func() {
+			appState = "test_app_state"
 			BeforeEach(func() {
 				fakeCC.AppendHandlers(
 					ghttp.CombineHandlers(
-						ghttp.VerifyRequest("GET", PathApp+"/test-app-id"),
-						ghttp.RespondWithJSONEncoded(http.StatusOK, models.AppInfo{
-							models.AppEntity{Instances: 6},
-						}),
+						ghttp.VerifyRequest("GET", PathApp+"/test-app-id/summary"),
+						ghttp.RespondWithJSONEncoded(http.StatusOK,
+							models.AppEntity{
+								Instances: 6,
+								State:     &appState,
+							}),
 					),
 				)
 			})
 
 			It("returns correct instance number", func() {
 				Expect(err).NotTo(HaveOccurred())
-				Expect(instances).To(Equal(6))
+				Expect(appEntity.Instances).To(Equal(6))
+				Expect(*appEntity.State).To(Equal("test_app_state"))
 			})
 		})
 
-		Context("when get app summary return non-200 status code", func() {
+		Context("when get app summary return 404 status code", func() {
 			BeforeEach(func() {
 				fakeCC.AppendHandlers(
 					ghttp.CombineHandlers(
-						ghttp.RespondWithJSONEncoded(http.StatusNotFound, ""),
+						ghttp.RespondWithJSONEncoded(http.StatusNotFound, models.CFErrorResponse{
+							Description: "The app could not be found: 7efa8f58-1aba-4493-bf9e-30d69c40dbb42",
+							ErrorCode:   "CF-AppNotFound",
+							Code:        100004,
+						}),
 					),
 				)
 			})
 
 			It("should error", func() {
-				Expect(instances).To(Equal(-1))
+				Expect(appEntity).To(BeNil())
+				Expect(err).To(Equal(models.NewAppNotFoundErr("The app could not be found: 7efa8f58-1aba-4493-bf9e-30d69c40dbb42")))
+				Expect(err).To(MatchError(MatchRegexp("The app could not be found: *")))
+			})
+		})
+
+		Context("when get app summary return non-200 and non-404 status code", func() {
+			BeforeEach(func() {
+				fakeCC.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.RespondWithJSONEncoded(http.StatusInternalServerError, models.CFErrorResponse{
+							Description: "Server error",
+							ErrorCode:   "ServerError",
+							Code:        100001,
+						}),
+					),
+				)
+			})
+
+			It("should error", func() {
+				Expect(appEntity).To(BeNil())
+				Expect(err).To(MatchError(MatchRegexp("failed getting application summary: *")))
+			})
+
+		})
+
+		Context("when get app summary return non-200 and non-404 status code with non-JSON response", func() {
+			BeforeEach(func() {
+				fakeCC.AppendHandlers(
+					ghttp.CombineHandlers(
+						ghttp.RespondWithJSONEncoded(http.StatusInternalServerError, ""),
+					),
+				)
+			})
+
+			It("should error", func() {
+				Expect(appEntity).To(BeNil())
 				Expect(err).To(MatchError(MatchRegexp("failed getting application summary: *")))
 			})
 
@@ -101,7 +146,7 @@ var _ = Describe("App", func() {
 			})
 
 			It("should error", func() {
-				Expect(instances).To(Equal(-1))
+				Expect(appEntity).To(BeNil())
 				Expect(err).To(BeAssignableToTypeOf(&url.Error{}))
 				urlErr := err.(*url.Error)
 				Expect(urlErr.Err).To(BeAssignableToTypeOf(&net.OpError{}))
@@ -119,7 +164,7 @@ var _ = Describe("App", func() {
 			})
 
 			It("should error", func() {
-				Expect(instances).To(Equal(-1))
+				Expect(appEntity).To(BeNil())
 				Expect(err).To(BeAssignableToTypeOf(&json.UnmarshalTypeError{}))
 			})
 
@@ -148,9 +193,12 @@ var _ = Describe("App", func() {
 
 		Context("when updating app instances returns non-200 status code", func() {
 			BeforeEach(func() {
+				responseMap := make(map[string]interface{})
+				responseMap["description"] = "You have exceeded the instance memory limit for your space's quota"
+				responseMap["error_code"] = "SpaceQuotaInstanceMemoryLimitExceeded"
 				fakeCC.AppendHandlers(
 					ghttp.CombineHandlers(
-						ghttp.RespondWithJSONEncoded(http.StatusNotFound, ""),
+						ghttp.RespondWithJSONEncoded(http.StatusBadRequest, responseMap),
 					),
 				)
 			})

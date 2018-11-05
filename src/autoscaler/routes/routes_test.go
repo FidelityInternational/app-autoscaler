@@ -15,32 +15,6 @@ var _ = Describe("Routes", func() {
 		testMetricType string = "testMetricType"
 	)
 	Describe("MetricsCollectorRoutes", func() {
-		Context("GetMemoryMetricRoute", func() {
-			Context("when provide correct route variable", func() {
-				It("should return the correct path", func() {
-					path, err := routes.MetricsCollectorRoutes().Get(routes.GetMemoryMetricRouteName).URLPath("appid", testAppId)
-					Expect(err).NotTo(HaveOccurred())
-					Expect(path.Path).To(Equal("/v1/apps/" + testAppId + "/metrics/memoryused"))
-				})
-			})
-
-			Context("when provide wrong route variable", func() {
-				It("should return error", func() {
-					_, err := routes.MetricsCollectorRoutes().Get(routes.GetMemoryMetricRouteName).URLPath("wrongVariable", testAppId)
-					Expect(err).To(HaveOccurred())
-
-				})
-			})
-
-			Context("when provide not enough route variable", func() {
-				It("should return error", func() {
-					_, err := routes.MetricsCollectorRoutes().Get(routes.GetMemoryMetricRouteName).URLPath()
-					Expect(err).To(HaveOccurred())
-
-				})
-			})
-		})
-
 		Context("GetMetricHistoriesRoute", func() {
 			Context("when provide correct route variable", func() {
 				It("should return the correct path", func() {
@@ -61,6 +35,35 @@ var _ = Describe("Routes", func() {
 			Context("when provide not enough route variable", func() {
 				It("should return error", func() {
 					_, err := routes.MetricsCollectorRoutes().Get(routes.GetMetricHistoriesRouteName).URLPath("appid", testAppId)
+					Expect(err).To(HaveOccurred())
+
+				})
+			})
+		})
+
+	})
+
+	Describe("EventGeneratorRoutes", func() {
+		Context("GetAggregatedMetricHistoriesRouteName", func() {
+			Context("when provide correct route variable", func() {
+				It("should return the correct path", func() {
+					path, err := routes.EventGeneratorRoutes().Get(routes.GetAggregatedMetricHistoriesRouteName).URLPath("appid", testAppId, "metrictype", testMetricType)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(path.Path).To(Equal("/v1/apps/" + testAppId + "/aggregated_metric_histories/" + testMetricType))
+				})
+			})
+
+			Context("when provide wrong route variable", func() {
+				It("should return error", func() {
+					_, err := routes.EventGeneratorRoutes().Get(routes.GetAggregatedMetricHistoriesRouteName).URLPath("wrongVariable", testAppId)
+					Expect(err).To(HaveOccurred())
+
+				})
+			})
+
+			Context("when provide not enough route variable", func() {
+				It("should return error", func() {
+					_, err := routes.EventGeneratorRoutes().Get(routes.GetAggregatedMetricHistoriesRouteName).URLPath("appid", testAppId)
 					Expect(err).To(HaveOccurred())
 
 				})
