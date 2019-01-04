@@ -118,8 +118,8 @@ func (c *Collector) refreshApps() {
 func (c *Collector) Stop() {
 	if c.ticker != nil {
 		c.ticker.Stop()
-		close(c.doneChan)
-		close(c.doneSaveChan)
+		c.doneChan <- true
+		c.doneSaveChan <- true
 
 		c.lock.Lock()
 		for _, ap := range c.appCollectors {
